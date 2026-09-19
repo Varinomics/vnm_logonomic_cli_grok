@@ -240,24 +240,24 @@ public:
                 const auto waited = waitpid(s_children[i], &status, WNOHANG);
                 if (waited == s_children[i] || (waited < 0 && errno == ECHILD)) s_children[i] = 0;
             }
-            if (!m_slot && s_children[i] == 0) { m_slot = i; s_children[i] = -1; }
+            if (!m_slot && s_children[i] == 0) { m_slot = &s_children[i]; *m_slot = -1; }
         }
     }
     ~Child_custody()
     {
-        if (m_slot && !m_retained) { std::lock_guard lock(s_mutex); s_children[*m_slot] = 0; }
+        if (m_slot && !m_retained) { std::lock_guard lock(s_mutex); *m_slot = 0; }
     }
-    bool admitted() const { return m_slot.has_value(); }
+    bool admitted() const { return m_slot != nullptr; }
     void retain(pid_t child)
     {
         std::lock_guard lock(s_mutex);
-        s_children[*m_slot] = child;
+        *m_slot = child;
         m_retained = true;
     }
 private:
     inline static std::mutex s_mutex;
     inline static std::array<pid_t, 32> s_children{};
-    std::optional<std::size_t> m_slot;
+    pid_t* m_slot = nullptr;
     bool m_retained = false;
 };
 

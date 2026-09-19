@@ -102,6 +102,21 @@ int main(int argc, char** argv)
             if (const auto* value = std::getenv(key)) preparation.launch_environment->effective_environment.set(key, addon::Json_value(value));
         }
         const auto locator = (root / "profiles" / "." / "native").string();
+        grok::Environment probe_environment;
+        for (const auto& member : preparation.launch_environment->effective_environment.as_object()) {
+            probe_environment.emplace_back(member.name, member.value.as_string());
+        }
+        // Exceed the custody table's capacity across failed spawns and reaped
+        // children to verify that both paths release their reservations.
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            Context probe;
+            require(!grok::run_probe({(root / "absent-cli").string()}, probe_environment, root.string(), 1000, probe),
+                "Missing probe executable unexpectedly spawned");
+            const auto result = grok::run_probe({fake.string(), "--help"}, probe_environment, root.string(), 1000, probe);
+            require(result && (result->output == "Grok Build --session-id --resume\n" ||
+                result->output == "Grok Build --session-id --resume\r\n"),
+                "Probe custody admission leaked after failed spawn or child reaping");
+        }
         preparation.account_context = addon::Account_context{2, grok::profile_account_key(locator), locator};
         Context context;
         context.input.capability = {"launch-preparation", 3};
