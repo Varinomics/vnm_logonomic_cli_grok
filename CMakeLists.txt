@@ -101,6 +101,13 @@ foreach(test_name IN ITEMS grok_runtime_tests grok_acp_tests grok_probe_tests gr
 endforeach()
 add_test(NAME grok_package_validation COMMAND logonomic_cli_addon_validate "${GROK_PACKAGE_DIRECTORY}" --platform "${GROK_PLATFORM}")
 add_test(NAME grok_package_conformance COMMAND logonomic_cli_addon_conformance "${GROK_PACKAGE_DIRECTORY}")
+add_executable(grok_usage_cache_tests tests/grok_usage_cache_tests.cpp)
+target_link_libraries(grok_usage_cache_tests PRIVATE grok_provider)
+grok_target(grok_usage_cache_tests)
+add_dependencies(grok_usage_cache_tests grok_package)
+add_test(NAME grok_usage_cache_tests
+    COMMAND grok_usage_cache_tests "${GROK_PACKAGE_DIRECTORY}")
+set_tests_properties(grok_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
 logonomic_cli_addon_install_package("${GROK_PACKAGE_DIRECTORY}" logonomic.cli.grok)
 
 add_executable(grok_fake_vnmctl tests/grok_fake_vnmctl.cpp)

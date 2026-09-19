@@ -64,7 +64,7 @@ int main()
     options.capabilities = {
         {"presentation", 1}, {"launcher-discovery", 1}, {"launch-preparation", 3},
         {"managed-configuration", 2}, {"profile-storage", 1}, {"accounts", 2},
-        {"auth-status", 2}, {"quota", 2}, {"usage-scan", 2},
+        {"auth-status", 2}, {"quota", 2}, {"usage-scan", 2}, {"usage-scan", 3},
         {"lifecycle-events", 2}, {"helper-ingress", 2}, {"coordination-delivery", 1},
         {"model-context-delivery", 1}, {"interactive-resume", 2}, {"structured-session", 2}, {"delegated-session", 2},
     };
