@@ -4,6 +4,7 @@
 #include "grok_usage_records.h"
 
 #include <logonomic_cli_addon/sha256.h>
+#include <logonomic_cli_addon/ids.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -20,6 +21,7 @@
 #include <charconv>
 #include <chrono>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <stdexcept>
@@ -35,6 +37,20 @@ constexpr std::size_t k_sort_bytes = 4 * 1024 * 1024;
 constexpr std::size_t k_sort_records = 128;
 constexpr int k_parser_revision = 1;
 std::timed_mutex scan_mutex;
+
+fs::path cache_io_path(const fs::path& path)
+{
+#ifdef _WIN32
+    // Cache descendants can exceed MAX_PATH in account-scoped storage.
+    // Keep the extended spelling local to I/O, never account or wire identity.
+    auto native = fs::absolute(path).lexically_normal().make_preferred().native();
+    if (native.starts_with(L"\\\\?\\")) return fs::path(native);
+    if (native.starts_with(L"\\\\")) return fs::path(L"\\\\?\\UNC\\" + native.substr(2));
+    return fs::path(L"\\\\?\\" + native);
+#else
+    return path;
+#endif
+}
 
 struct Scan_failure { std::string reason; };
 
@@ -804,9 +820,76 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
         check_cancel(cancelled);
         // Bootstrap creates only these three zero-byte entries before inventory.
         require(limits.filesystem_entries >= 3, "usage_disk_budget_exceeded");
-        const auto root = directory(storage, "grok-usage-v1");
-        Storage_lock storage_lock(root / "scan.lock", cancelled);
-        const auto snapshots = directory(root, "snapshots");
+        const auto* selection = request.cache_selection ? &*request.cache_selection : nullptr;
+        addon::Contract_failure failure;
+        std::string request_hash;
+        fs::path root;
+        fs::path snapshots;
+        std::unique_ptr<Storage_lock> storage_lock;
+        if (selection) {
+            require(addon::validate_usage_cache_selection(request, &failure), "usage_cache_selection_invalid");
+            const auto outside_mutable = [&](const std::string& selected) {
+                const auto mutable_path = storage / "grok-usage-v1";
+                for (auto path = addon::path_from_utf8(selected); path.has_relative_path(); path = path.parent_path()) {
+                    std::error_code error;
+                    if (fs::equivalent(path, mutable_path, error)) {
+                        return false;
+                    }
+                }
+                const auto relative = addon::path_from_utf8(selected).lexically_relative(storage);
+                auto name = addon::path_to_utf8(*relative.begin());
+#ifdef _WIN32
+                name = addon::ascii_lowercase(name);
+#endif
+                return name != "grok-usage-v1";
+            };
+            require(outside_mutable(selection->candidate_root) &&
+                (!selection->accepted || outside_mutable(selection->accepted->root)), "usage_cache_namespace_conflict");
+            require(addon::validate_usage_cache_root(selection->candidate_root, addon::path_to_utf8(storage), &failure),
+                "usage_cache_unavailable");
+            root = cache_io_path(addon::path_from_utf8(selection->candidate_root));
+            auto identity = request;
+            identity.snapshot_id.reset();
+            identity.cursor.reset();
+            request_hash = addon::to_hex(addon::Sha256::digest(
+                addon::serialize_json_canonical(addon::encode_usage_scan_request(identity, 3))));
+            if (request.snapshot_id) {
+                const auto state = read_json(root / "cache-state");
+                require(state && string_member(*state, "request_sha256") == request_hash &&
+                    string_member(*state, "snapshot_id") == *request.snapshot_id, "usage_snapshot_mismatch");
+                auto page = page_at(root, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled);
+                page.cache_candidate = addon::Usage_cache_reference{
+                    selection->candidate_root, page.snapshot_id, file_digest(root / "cache-manifest.json", cancelled)};
+                for (auto& record : page.records) record.aggregate_evidence = "partial";
+                return page;
+            }
+            require(addon::validate_usage_cache_allocation(selection->candidate_root, addon::path_to_utf8(storage), &failure),
+                "usage_cache_unavailable");
+            if (selection->accepted) {
+                const auto manifest = addon::validate_usage_cache_candidate(*selection->accepted,
+                    addon::path_to_utf8(storage), request.context.account_context, cancelled, &failure);
+                check_cancel(cancelled);
+                require(manifest && manifest->format == "grok-turn-cache@1", "usage_cache_unavailable");
+            }
+            if (request.native_file_cache) {
+                const auto& seed = *request.native_file_cache;
+                require(request.context.account_context &&
+                    seed.source_account_key == request.context.account_context->adapter_account_key,
+                    "usage_native_cache_account_mismatch");
+                addon::Directory_package_source source(storage);
+                addon::Source_error source_error;
+                const auto relative = addon::path_from_utf8(seed.path).lexically_relative(storage);
+                const auto bytes = source.read(addon::path_to_utf8(relative), 1, &source_error);
+                require(bytes && bytes->empty() && addon::to_hex(addon::Sha256::digest(*bytes)) == seed.sha256_hex,
+                    "usage_native_cache_unsupported");
+                require(!seed.cache_required || selection->accepted.has_value(), "required_usage_cache_unavailable");
+            }
+        }
+        else {
+            root = directory(cache_io_path(storage), "grok-usage-v1");
+            storage_lock = std::make_unique<Storage_lock>(root / "scan.lock", cancelled);
+            snapshots = directory(root, "snapshots");
+        }
         if (request.snapshot_id) {
             require(digest_name(*request.snapshot_id) && request.cursor.has_value(), "usage_cursor_invalid");
             return page_at(snapshots / *request.snapshot_id, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled);
@@ -818,11 +901,17 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
         const auto sessions = vendor_profile / "sessions";
         const bool have_sessions = fs::exists(sessions);
         require(!have_sessions || fs::is_directory(sessions), "usage_sessions_not_directory");
-        const auto accepted = accepted_generations(root);
-        prune_snapshots(snapshots, accepted);
+        const auto accepted = selection ? Accepted_generations{} : accepted_generations(root);
+        if (!selection) prune_snapshots(snapshots, accepted);
         const auto identifier = nonce();
-        const auto work = directory(snapshots, identifier);
+        const auto work = selection ? root : directory(snapshots, identifier);
         Pending_snapshot pending(work);
+        // Host allocations, including failed writes, remain owned by the host.
+        if (selection) pending.commit();
+        if (selection && selection->accepted) {
+            copy_accepted_cache(cache_io_path(addon::path_from_utf8(selection->accepted->root)), work,
+                request.context.account_context, cancelled);
+        }
         if (!accepted.current.empty()) {
             copy_accepted_cache(snapshots / accepted.current, work, request.context.account_context, cancelled);
         }
@@ -859,6 +948,19 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
         write_json(work / "snapshot", metadata);
         auto page = page_at(work, identifier, 0, request.context.account_context, cancelled);
         check_cancel(cancelled);
+        if (selection) {
+            auto state = addon::Json_value::object();
+            state.set("request_sha256", addon::Json_value(request_hash));
+            state.set("snapshot_id", addon::Json_value(identifier));
+            write_json(work / "cache-state", state);
+            // A surviving native session file does not prove complete aggregate history.
+            for (auto& record : page.records) record.aggregate_evidence = "partial";
+            page.cache_candidate = addon::seal_usage_cache_candidate(
+                selection->candidate_root, addon::path_to_utf8(storage), request.context.account_context,
+                identifier, "grok-turn-cache@1", cancelled, &failure);
+            if (!page.cache_candidate) throw Scan_failure{failure.reason_code};
+            return page;
+        }
         auto pointer = addon::Json_value::object();
         pointer.set("snapshot_id", addon::Json_value(identifier));
         pointer.set("previous_snapshot_id", accepted.current.empty()
@@ -888,7 +990,8 @@ void handle_usage(addon::Invocation_context& context)
 {
     if (context.request().operation != addon::k_usage_scan_operation) { context.reject_unknown_operation(); return; }
     addon::Contract_failure failure;
-    const auto request = addon::decode_usage_scan_request(context.request().payload, &failure, 2);
+    const auto version = context.request().capability.version;
+    const auto request = addon::decode_usage_scan_request(context.request().payload, &failure, version);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code); return; }
     const auto profile = selected_profile(request->context, context);
     if (!profile) return;
@@ -897,7 +1000,7 @@ void handle_usage(addon::Invocation_context& context)
     const auto page = scan_usage(*request, logonomic::cli_addon::path_from_utf8(profile->profile_path), logonomic::cli_addon::path_from_utf8(request->context.profile_storage->root),
         [&context] { return context.cancel_requested(); }, &error);
     if (!page) { context.fail(error == "cancelled" ? addon::Result_status::CANCELLED : addon::Result_status::FAILED, error); return; }
-    context.succeed(addon::encode_usage_scan_result(*page, 2));
+    context.succeed(addon::encode_usage_scan_result(*page, version));
 }
 
 } // namespace grok
