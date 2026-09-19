@@ -1,6 +1,7 @@
 #include "grok_configuration.h"
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/session_contracts.h>
 namespace grok {
 namespace addon = logonomic::cli_addon;
 std::string hook_configuration()

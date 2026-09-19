@@ -1,3 +1,4 @@
+#include <logonomic_cli_addon/package_source.h>
 #include "grok_accounts.h"
 #include "grok_launcher.h"
 
@@ -60,9 +61,9 @@ std::string profile_account_key(std::string_view absolute_path)
     // account key must not change when the CLI creates that profile. This is
     // identity only: the native locator and launch value remain verbatim.
     std::error_code error;
-    fs::path path = fs::weakly_canonical(fs::u8path(absolute_path), error);
-    if (error) path = fs::u8path(absolute_path);
-    path = fs::u8path(path_text(path));
+    fs::path path = fs::weakly_canonical(logonomic::cli_addon::path_from_utf8(absolute_path), error);
+    if (error) path = logonomic::cli_addon::path_from_utf8(absolute_path);
+    path = logonomic::cli_addon::path_from_utf8(path_text(path));
 #if defined(_WIN32)
     std::wstring wide = path.generic_wstring();
     const int size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, wide.data(),
@@ -100,12 +101,12 @@ std::optional<Profile_selection> profile_selection(const addon::Launch_environme
     if (profile.empty()) {
         std::string home = resolved_value(windows ? "USERPROFILE" : "HOME").value_or(std::string(fallback));
         std::error_code canonical_error;
-        auto home_path = fs::canonical(fs::u8path(home), canonical_error);
-        if (canonical_error) home_path = fs::u8path(home);
+        auto home_path = fs::canonical(logonomic::cli_addon::path_from_utf8(home), canonical_error);
+        if (canonical_error) home_path = logonomic::cli_addon::path_from_utf8(home);
         profile = path_text(home_path / ".grok");
     }
-    fs::path path = fs::u8path(profile);
-    if (!path.is_absolute()) path = fs::u8path(normalization_directory) / path;
+    fs::path path = logonomic::cli_addon::path_from_utf8(profile);
+    if (!path.is_absolute()) path = logonomic::cli_addon::path_from_utf8(normalization_directory) / path;
     if (!path.is_absolute()) { *error = "profile_path_invalid"; return std::nullopt; }
     Profile_selection selected{profile_account_key(path_text(path)), path_text(path)};
     if (selected.adapter_account_key.empty()) { *error = "profile_path_invalid"; return std::nullopt; }
@@ -129,8 +130,8 @@ std::optional<std::string> launch_profile_home(const addon::Session_launch_conte
         context.fail(addon::Result_status::UNAVAILABLE, "launcher_environment_unavailable"); return {};
     }
     if (!raw || raw->empty()) return selected->profile_path;
-    auto actual = fs::u8path(*raw);
-    if (!actual.is_absolute()) actual = fs::u8path(request.working_directory) / actual;
+    auto actual = logonomic::cli_addon::path_from_utf8(*raw);
+    if (!actual.is_absolute()) actual = logonomic::cli_addon::path_from_utf8(request.working_directory) / actual;
     if (profile_account_key(path_text(actual)) != selected->adapter_account_key) {
         context.fail(addon::Result_status::UNAVAILABLE, "account_context_mismatch");
         return {};
@@ -165,7 +166,7 @@ void handle_accounts(addon::Invocation_context& context)
     if (!selected) { context.fail(addon::Result_status::FAILED, error); return; }
     if (context.request().operation == addon::k_accounts_discover_operation) {
         std::error_code failure;
-        const bool exists = fs::is_directory(fs::u8path(selected->profile_path), failure);
+        const bool exists = fs::is_directory(logonomic::cli_addon::path_from_utf8(selected->profile_path), failure);
         addon::Account_record account;
         account.adapter_account_key = selected->adapter_account_key;
         account.profile_path = selected->profile_path;

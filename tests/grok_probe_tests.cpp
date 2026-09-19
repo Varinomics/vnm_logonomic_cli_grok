@@ -2,6 +2,8 @@
 #include "grok_probes.h"
 #include "grok_launcher.h"
 
+#include <logonomic_cli_addon/package_source.h>
+
 #include <iostream>
 #include <filesystem>
 #include <chrono>
@@ -29,7 +31,8 @@ void exercise()
     const auto base = std::filesystem::temp_directory_path().generic_string();
     std::string profile_error;
     const auto selected = grok::profile_selection(environment, launcher, base, base, &profile_error);
-    check(selected && selected->profile_path == (std::filesystem::path(base) / "profiles" / "grok").string(),
+    check(selected && addon::path_from_utf8(selected->profile_path) ==
+        std::filesystem::path(base) / "profiles" / "grok",
         "relative GROK_HOME uses frozen host normalization directory");
     launcher.runner_key = addon::k_runner_bash;
     for (const std::string prefix : {"~/profiles/grok", "'~/profiles/grok'", "\"~/profiles/grok\""}) {
@@ -105,21 +108,21 @@ void exercise()
         quota.observation->primary->used_percent == 63.5 && quota.observation->credits_balance == "12.34",
         "native percentage wins over deprecated cents and prepaid cents stay exact");
     addon::Contract_failure failure;
-    check(addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(quota, 2), &failure, 2).has_value(),
+    check(addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(quota, 2), request.inspection.final, &failure, 2).has_value(),
         "native quota observation satisfies the host decimal credit contract");
     for (const double percent : {-7.5, 125.0}) {
         request.inspection.stdout_bytes = "{\"id\":2,\"result\":{\"config\":{\"creditUsagePercent\":" +
             std::to_string(percent) + "}}}\n";
         const auto observation = grok::inspect_quota(request);
         check(observation.observation->primary->used_percent == percent &&
-            addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(observation, 2), &failure, 2).has_value(),
+            addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(observation, 2), request.inspection.final, &failure, 2).has_value(),
             "quota-scan preserves every finite signed percentage without saturation");
     }
     request.inspection.stdout_bytes = R"({"id":2,"result":{"config":{"monthlyLimit":{"val":10000},"used":{"val":15000},"onDemandCap":{"val":2000},"onDemandUsed":{"val":3000},"prepaidBalance":{"val":-125}}}})" "\n";
     const auto overage = grok::inspect_quota(request);
     check(overage.observation->primary->used_percent == 150.0 &&
         overage.observation->secondary->used_percent == 150.0 && overage.observation->credits_balance == "-1.25" &&
-        addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(overage, 2), &failure, 2).has_value(),
+        addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(overage, 2), request.inspection.final, &failure, 2).has_value(),
         "cents-derived primary and on-demand overages and signed balances survive host decoding");
     request.inspection.stdout_bytes = R"({"id":2,"error":{"code":-32603,"message":"secret diagnostic"}})" "\n";
     const auto failed = grok::inspect_quota(request);

@@ -1,3 +1,4 @@
+#include <logonomic_cli_addon/package_source.h>
 #include "grok_usage_records.h"
 
 #include <array>
@@ -116,7 +117,7 @@ std::optional<std::int64_t> timestamp(std::string_view iso)
     if (offset != iso.size()) {
         return std::nullopt;
     }
-    const auto days = std::chrono::sys_days(date).time_since_epoch().count();
+    const std::int64_t days = std::chrono::sys_days(date).time_since_epoch().count();
     return ((days * 24 + hour) * 3600 + minute * 60 + second - zone_minutes * 60) * 1000 + milliseconds;
 }
 
@@ -125,7 +126,7 @@ std::optional<std::int64_t> timestamp(std::string_view iso)
 
 std::optional<std::string> repository_for_cwd(std::string_view cwd)
 {
-    fs::path candidate = fs::u8path(cwd).lexically_normal();
+    fs::path candidate = logonomic::cli_addon::path_from_utf8(cwd).lexically_normal();
     std::error_code error;
     if (!candidate.is_absolute() || !fs::is_directory(candidate, error)) return std::nullopt;
     while (!candidate.empty()) {

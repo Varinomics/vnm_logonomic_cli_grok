@@ -66,7 +66,6 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
         for (const auto& [key, value] : server.environment)
             environment.push_back(object({{"name", Json(key)}, {"value", Json(value)}}));
         auto args = Json::array();
-        args.push_back(Json("mcp")); args.push_back(Json("--stdio"));
         servers.push_back(object({{"name", Json(name)}, {"command", Json(server.program)},
             {"args", std::move(args)}, {"env", std::move(environment)}}));
         auto actions = Json::array();

@@ -84,7 +84,8 @@ void exercise(const fs::path& root)
     request.context.account_context = addon::Account_context{1, "fixture"};
     std::string error;
     const auto first = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
-    check(first && first->records.size() == 1, "one native turn produces one record");
+    check(first.has_value(), error.c_str());
+    check(first->records.size() == 1, "one native turn produces one record");
     const auto& row = first->records.front();
     check(row.total_tokens == 25 && row.input.value == 20 && row.output.value == 5,
         "cache and reasoning subsets do not inflate input plus output");
@@ -210,7 +211,7 @@ void interrupted_refresh(const fs::path& root)
                 if (!std::getline(input, header) || !std::getline(input, record)) {
                     continue;
                 }
-                const auto parsed = addon::parse_json(record);
+                const auto parsed = addon::parse_json(record, {}, nullptr);
                 const auto* usage_record = parsed ? parsed->find("usage") : nullptr;
                 const auto* tokens = usage_record ? usage_record->find("total_tokens") : nullptr;
                 if (tokens && tokens->is_integer() && tokens->as_integer() == 305) {
@@ -262,7 +263,7 @@ void interrupted_refresh(const fs::path& root)
     std::ifstream cache_input(retained_artifact, std::ios::binary);
     std::string header;
     check(static_cast<bool>(std::getline(cache_input, header)), "retained artifact has metadata");
-    auto metadata = addon::parse_json(header);
+    auto metadata = addon::parse_json(header, {}, nullptr);
     check(metadata && metadata->is_object(), "retained metadata is an object");
     metadata->set("size", addon::Json_value("0"));
     std::ostringstream records;

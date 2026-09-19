@@ -1,3 +1,4 @@
+#include <logonomic_cli_addon/package_source.h>
 #include "grok_usage.h"
 #include "grok_accounts.h"
 #include "grok_usage_records.h"
@@ -387,7 +388,7 @@ std::optional<addon::Json_value> read_json(const fs::path& path)
     require(static_cast<bool>(input), "usage_storage_read_failed");
     std::string line;
     require(read_line(input, &line), "usage_cache_invalid");
-    auto value = addon::parse_json(line);
+    auto value = addon::parse_json(line, {}, nullptr);
     require(value.has_value() && value->is_object(), "usage_cache_invalid");
     require(!read_line(input, &line), "usage_cache_invalid");
     return value;
@@ -419,7 +420,7 @@ std::string encode_record(const Session_usage_record& record)
 
 Session_usage_record decode_record(std::string_view line)
 {
-    const auto value = addon::parse_json(line);
+    const auto value = addon::parse_json(line, {}, nullptr);
     require(value && value->is_object(), "usage_cache_invalid");
     addon::Contract_failure failure;
     auto record = addon::decode_usage_record(member(*value, "usage"), &failure, 2);
@@ -458,7 +459,7 @@ addon::Json_value read_cache_header(const fs::path& path, std::ifstream* input)
     require(static_cast<bool>(*input), "usage_storage_read_failed");
     std::string line;
     require(read_line(*input, &line), "usage_cache_invalid");
-    auto header = addon::parse_json(line);
+    auto header = addon::parse_json(line, {}, nullptr);
     require(header && header->is_object(), "usage_cache_invalid");
     require(cache_key(string_member(*header, "source")) == path.stem().string(), "usage_cache_identity_mismatch");
     return std::move(*header);
@@ -504,7 +505,7 @@ void refresh_file(const fs::path& path, const fs::path& work,
     std::string error;
     std::uint64_t file_records = 0;
     std::uint64_t file_bytes = 0;
-    const bool parsed = read_session_usage(input, fs::u8path(source), [&](const Session_usage_record& record) {
+    const bool parsed = read_session_usage(input, logonomic::cli_addon::path_from_utf8(source), [&](const Session_usage_record& record) {
         if (record.usage.input.coverage->covered_records == 0) *incomplete = true;
         const auto encoded = encode_record(record);
         require(file_records < active_budget->limits().candidate_records && encoded.size() + 1 <=
@@ -598,7 +599,7 @@ void copy_accepted_cache(const fs::path& accepted, const fs::path& candidate,
     require(static_cast<bool>(input), "usage_storage_read_failed");
     std::string line;
     require(read_line(input, &line), "required_usage_cache_unavailable");
-    const auto header = addon::parse_json(line);
+    const auto header = addon::parse_json(line, {}, nullptr);
     require(header && member(*header, "version") == addon::Json_value(1) &&
         member(*header, "account") == account_value(account), "required_usage_cache_unavailable");
     addon::Sha256 hash;
@@ -893,7 +894,7 @@ void handle_usage(addon::Invocation_context& context)
     if (!profile) return;
     if (!request->context.profile_storage) { context.fail(addon::Result_status::UNAVAILABLE, "profile_storage_unavailable"); return; }
     std::string error;
-    const auto page = scan_usage(*request, fs::u8path(profile->profile_path), fs::u8path(request->context.profile_storage->root),
+    const auto page = scan_usage(*request, logonomic::cli_addon::path_from_utf8(profile->profile_path), logonomic::cli_addon::path_from_utf8(request->context.profile_storage->root),
         [&context] { return context.cancel_requested(); }, &error);
     if (!page) { context.fail(error == "cancelled" ? addon::Result_status::CANCELLED : addon::Result_status::FAILED, error); return; }
     context.succeed(addon::encode_usage_scan_result(*page, 2));

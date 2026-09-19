@@ -159,13 +159,27 @@ int main()
         request.prompt = "Make the requested change.";
         request.context.working_directory = "/workspace";
         request.control.task_id = "task-1";
-        request.control.servers.push_back({"control", "/vnmctl", {"complete"}, {}});
+        request.control.servers.push_back({"control", "/task-control", {"complete"}, {{"BOUND_CONTEXT", "opaque"}}});
         addon::Structured_inspection inspection;
         inspection.protocol_state = acp_initial_state(request);
         inspection.stdout_bytes = reply(1, object({{"protocolVersion", Json(1)}}));
         auto result = inspect_acp(inspection);
         require(result.stdin_bytes && result.stdin_bytes->find("session/new") != std::string::npos, "new session not sequenced after initialize");
         require(result.stdin_bytes->find("session/prompt") == std::string::npos, "prompt escaped MCP admission");
+        const auto native_new = parse(*result.stdin_bytes);
+        require(native_new.has_value(), "session/new must remain valid native JSON");
+        const auto& emitted_servers = member(member(*native_new, "params"), "mcpServers");
+        require(emitted_servers.is_array() && emitted_servers.as_array().size() == 1,
+            "forward exactly the required task server");
+        const auto& emitted_server = emitted_servers.as_array().front();
+        require(text(emitted_server, "command") == "/task-control" &&
+            member(emitted_server, "args").is_array() && member(emitted_server, "args").as_array().empty(),
+            "host task server is an exact entrypoint, not a vnmctl command prefix");
+        const auto& emitted_env = member(emitted_server, "env");
+        require(emitted_env.is_array() && emitted_env.as_array().size() == 1 &&
+            text(emitted_env.as_array().front(), "name") == "BOUND_CONTEXT" &&
+            text(emitted_env.as_array().front(), "value") == "opaque",
+            "preserve exact host-granted server environment");
         inspection.protocol_state = result.protocol_state;
         inspection.stdout_bytes = reply(2, object({{"sessionId", Json("root-session")}}));
         result = inspect_acp(inspection);
