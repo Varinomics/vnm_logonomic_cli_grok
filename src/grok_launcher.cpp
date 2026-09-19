@@ -1,12 +1,9 @@
 #include "grok_launcher.h"
+#include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -26,199 +23,18 @@
 #endif
 namespace grok {
 namespace addon = logonomic::cli_addon;
-namespace fs = std::filesystem;
 namespace {
-std::string trim(std::string_view value)
-{
-    std::size_t first = value.size(), last = 0;
-    for (std::size_t offset = 0; offset < value.size();) {
-        const auto begin = offset;
-        const auto lead = static_cast<unsigned char>(value[offset++]);
-        std::uint32_t scalar = lead;
-        const auto continuation = lead >= 0xF0 ? 3u : lead >= 0xE0 ? 2u : lead >= 0xC0 ? 1u : 0u;
-        if (continuation != 0 && offset + continuation <= value.size()) {
-            scalar = lead & ((1u << (6u - continuation)) - 1u);
-            for (unsigned index = 0; index < continuation; ++index) {
-                scalar = (scalar << 6) | (static_cast<unsigned char>(value[offset++]) & 0x3F);
-            }
-        }
-        const bool whitespace = scalar == 0x20 || (scalar >= 9 && scalar <= 13) || scalar == 0x85 ||
-            scalar == 0xA0 || scalar == 0x1680 || (scalar >= 0x2000 && scalar <= 0x200A) ||
-            scalar == 0x2028 || scalar == 0x2029 || scalar == 0x202F || scalar == 0x205F || scalar == 0x3000;
-        if (!whitespace) { first = std::min(first, begin); last = offset; }
-    }
-    return last == 0 ? std::string{} : std::string(value.substr(first, last - first));
-}
 
-std::string lower(std::string value)
-{
-    for (char& character : value) {
-        if (character >= 'A' && character <= 'Z') character += 'a' - 'A';
-    }
-    return value;
-}
-
-std::string unquote(std::string_view value)
-{
-    std::string result = trim(value);
-    if (result.size() >= 2 &&
-        ((result.front() == '\'' && result.back() == '\'') ||
-         (result.front() == '"'  && result.back() == '"')))
-    {
-        return result.substr(1, result.size() - 2);
-    }
-    return result;
-}
-
-std::string base_name(std::string_view value)
-{
-    std::string name = lower(unquote(value));
-    const auto separator = name.find_last_of("/\\");
-    if (separator != std::string::npos) name.erase(0, separator + 1);
-    for (const std::string_view suffix : {".exe", ".cmd", ".ps1", ".bat"}) {
-        if (name.ends_with(suffix)) {
-            name.resize(name.size() - suffix.size());
-            break;
-        }
-    }
-    return name;
-}
-
-std::string path_string(const fs::path& path)
-{
-    const auto text = path.u8string();
-    return {reinterpret_cast<const char*>(text.data()), text.size()};
-}
-
-bool equal_name(std::string_view left, std::string_view right)
-{
-#ifdef _WIN32
-    return lower(std::string(left)) == lower(std::string(right));
-#else
-    return left == right;
-#endif
-}
-
-std::string environment_value(const Environment& environment, std::string_view name)
-{
-    for (const auto& [key, value] : environment) if (equal_name(key, name)) return value;
-    return {};
-}
-
-void set_environment(Environment& environment, std::string name, std::string value)
-{
-    std::erase_if(environment, [&](const auto& entry) { return equal_name(entry.first, name); });
-    environment.emplace_back(std::move(name), std::move(value));
-}
-
-std::optional<fs::path> regular_file(const fs::path& path)
-{
-    std::error_code error;
-    const auto canonical = fs::canonical(path, error);
-    return !error && fs::is_regular_file(canonical, error) && !error
-        ? std::optional(canonical) : std::nullopt;
-}
-
-std::optional<fs::path> resolve_program(
-    std::string_view program, const Environment& environment, std::string_view working_directory)
-{
-    const auto path = addon::path_from_utf8(program);
-    const bool has_working_directory = addon::path_from_utf8(working_directory).is_absolute();
-    const auto usable_program = [](const fs::path& candidate) -> std::optional<fs::path> {
-        const auto file = regular_file(candidate);
-#ifndef _WIN32
-        if (file && access(file->c_str(), X_OK) != 0) return std::nullopt;
-#endif
-        return file;
-    };
-    if (path.is_absolute()) return usable_program(path);
-    if (path.has_parent_path()) {
-        return has_working_directory ? usable_program(addon::path_from_utf8(working_directory) / path) : std::nullopt;
-    }
-    std::vector<fs::path> candidates;
-    {
-        const auto search_path = environment_value(environment, "PATH");
-#ifdef _WIN32
-        constexpr char separator = ';';
-#else
-        constexpr char separator = ':';
-#endif
-        std::istringstream parts(search_path);
-        for (std::string part; std::getline(parts, part, separator);) {
-            if (part.empty()) continue;
-            auto directory = addon::path_from_utf8(unquote(part));
-            if (!directory.is_absolute()) {
-                if (!has_working_directory) continue;
-                directory = addon::path_from_utf8(working_directory) / directory;
-            }
-            candidates.push_back(directory / path);
-        }
-    }
-    for (const auto& candidate : candidates) {
-#ifdef _WIN32
-        if (!candidate.has_extension()) {
-            auto extensions = environment_value(environment, "PATHEXT");
-            if (std::none_of(environment.begin(), environment.end(), [](const auto& entry) {
-                    return equal_name(entry.first, "PATHEXT");
-                })) extensions = ".COM;.EXE;.BAT;.CMD";
-            std::istringstream parts(extensions);
-            for (std::string extension; std::getline(parts, extension, ';');) {
-                extension = trim(extension);
-                if (extension.empty()) continue;
-                if (!extension.starts_with('.')) extension.insert(extension.begin(), '.');
-                if (const auto file = usable_program(addon::path_from_utf8(path_string(candidate) + extension))) return file;
-            }
-            continue;
-        }
-#endif
-        if (const auto file = usable_program(candidate)) return file;
-    }
-    return std::nullopt;
-}
-
-bool native_image(const fs::path& path)
-{
-    std::ifstream file(path, std::ios::binary);
-    std::array<unsigned char, 4> header{};
-    file.read(reinterpret_cast<char*>(header.data()), header.size());
-#ifdef _WIN32
-    return file.gcount() >= 2 && header[0] == 'M' && header[1] == 'Z';
-#else
-    if (file.gcount() != 4) return false;
-    const auto magic = (static_cast<std::uint32_t>(header[0]) << 24) |
-        (static_cast<std::uint32_t>(header[1]) << 16) |
-        (static_cast<std::uint32_t>(header[2]) << 8) | header[3];
-    return magic == 0x7f454c46 || magic == 0xfeedface || magic == 0xfeedfacf ||
-        magic == 0xcefaedfe || magic == 0xcffaedfe || magic == 0xcafebabe || magic == 0xbebafeca;
-#endif
-}
-
+using addon::lower;
+using addon::set_environment;
+using addon::resolve_program;
+using addon::native_image;
+using addon::path_to_utf8;
+using addon::base_name;
 
 #ifdef _WIN32
-std::wstring wide(std::string_view text)
-{
-    const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
-        static_cast<int>(text.size()), nullptr, 0);
-    if (size == 0) return {};
-    std::wstring result(size, L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
-        static_cast<int>(text.size()), result.data(), size);
-    return result;
-}
-
-std::wstring quote_argument(std::wstring_view argument)
-{
-    std::wstring result = L"\"";
-    std::size_t slashes = 0;
-    for (wchar_t character : argument) {
-        if (character == L'\\') { ++slashes; continue; }
-        result.append(character == L'"' ? slashes * 2 + 1 : slashes, L'\\');
-        result += character;
-        slashes = 0;
-    }
-    result.append(slashes * 2, L'\\');
-    return result + L'"';
-}
+using addon::wide;
+using addon::quote_argument;
 
 struct Handle
 {
@@ -556,7 +372,7 @@ std::optional<Probe_output> run_probe(const std::vector<std::string>& argv,
     const Environment& environment, std::string_view working_directory, int timeout_ms,
     addon::Invocation_context& context, Probe_exchange* exchange)
 {
-    return probe(argv, environment, working_directory, timeout_ms, context, exchange);
+    return grok::probe(argv, environment, working_directory, timeout_ms, context, exchange);
 }
 
 std::vector<std::string> literal_launcher_argv(std::string_view script)
@@ -642,7 +458,7 @@ std::optional<std::vector<std::string>> resolve_probe_launcher(
     if (!launcher_environment(command, effective_environment)) return std::nullopt;
     const auto program = resolve_program(command.program, environment, working_directory);
     if (!program || !native_image(*program)) return std::nullopt;
-    std::vector<std::string> result{path_string(*program)};
+    std::vector<std::string> result{path_to_utf8(*program)};
     result.insert(result.end(), operation_arguments.begin(), operation_arguments.end());
     return result;
 }
