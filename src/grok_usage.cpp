@@ -860,6 +860,8 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
                 auto page = page_at(root, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled);
                 page.cache_candidate = addon::Usage_cache_reference{
                     selection->candidate_root, page.snapshot_id, file_digest(root / "cache-manifest.json", cancelled)};
+                page.account_context = request.context.account_context;
+                page.profile_storage = request.context.profile_storage;
                 for (auto& record : page.records) record.aggregate_evidence = "partial";
                 return page;
             }
@@ -959,6 +961,8 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
                 selection->candidate_root, addon::path_to_utf8(storage), request.context.account_context,
                 identifier, "grok-turn-cache@1", cancelled, &failure);
             if (!page.cache_candidate) throw Scan_failure{failure.reason_code};
+            page.account_context = request.context.account_context;
+            page.profile_storage = request.context.profile_storage;
             return page;
         }
         auto pointer = addon::Json_value::object();
