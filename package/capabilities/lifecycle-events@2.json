@@ -1,0 +1,19 @@
+{
+  "capability_id": "lifecycle-events",
+  "version": 2,
+  "payload": {
+    "observation": "events",
+    "profile_id": "grok-file-hooks",
+    "turn_origin_correlation": "unsupported",
+    "features": {
+      "root_turn_start": "supported",
+      "root_turn_completion": "unsupported",
+      "subagents": "unsupported",
+      "confirmed_phase_status": "unsupported",
+      "attention": "unsupported",
+      "cooperative_description": "unsupported",
+      "blockable_completion": "unsupported",
+      "paired_attention": "unsupported"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "capability_id": "presentation",
+  "version": 1,
+  "payload": {
+    "display_name": "Grok Build",
+    "icon": {"light": "assets/grok.svg", "dark": "assets/grok-dark.svg"}
+  }
+}

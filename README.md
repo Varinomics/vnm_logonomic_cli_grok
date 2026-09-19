@@ -1,0 +1,89 @@
+# Logonomic Grok Build add-on
+
+Standalone C++20 package `logonomic.cli.grok`, using the public Logonomic CLI
+add-on SDK. Windows and Linux x86-64 artifacts are built separately.
+
+The provider preserves the selected `GROK_HOME` profile. Account discovery uses
+Grok's platform home convention and empty-override behavior. Authentication
+inspection reads the native `grok models` status banner after successful process
+completion. Quota inspection uses Grok's read-only ACP billing extension;
+credentials and model configuration remain owned by Grok.
+
+Native file hooks report session and turn starts through authenticated SDK
+helper ingress. Successful turn completion and subagent completion are not
+advertised: Grok's Stop hooks are gates that may continue the turn, and the
+file-hook channel has no matching confirmed subagent completion producer.
+Managed configuration targets only `hooks/logonomic.json` within the selected
+Grok home, under the host's bounded snapshot-and-replacement contract. The
+persisted command is inactive without Logonomic's launch authority and resolves
+the helper from that launch's environment. An existing different file is refused
+without overwriting its contents. Title and coordination instructions are supplied
+by the authenticated host at the first eligible root PreToolUse hook, whose
+additional context reaches the model. A turn that never calls a tool does not
+provide this delivery opportunity. Child hooks cannot consume the root title.
+
+Exact resume uses the saved native session UUID and native `--resume`; conflicting
+launcher identity or workspace options are refused. The host applies the managed
+hook transform before the resumed launch and admits its actual SessionStart.
+
+Structured implementation and delegated tasks use the native ACP stdio agent.
+Delegation supplies the host's task-control MCP servers, verifies their native
+session catalog reports ready and exposes every required action, then submits the
+prompt. Native end-turn and an acknowledged session close are required for a
+result. Native permission requests report `hook_approval_required`; the package
+does not change the selected permission policy. Model and reasoning-effort
+launcher options are preserved; other root-interface options are explicitly
+unavailable for ACP task preparation. Model selection has no version ceiling.
+
+Usage reads `sessions/<cwd>/<session>/usage.json` with its `summary.json`.
+Persisted turns already contain deltas, including folded subagent spend. The
+scanner counts each top-level turn once, preserves category values and retains
+cached history when source files disappear. Reasoning and cache subsets are
+not added again to the native input-plus-output total. Missing, partial, or
+incomplete costs remain unknown. Grok's 1e10 ticks per USD are converted only
+when exactly representable as whole microUSD; fractional microUSD remain unknown.
+
+Grok forks copy billed turns without durable original-row identities. An
+ordinary fork carrying usage therefore fails the account's candidate scan with
+`usage_fork_attribution_unavailable`; the last accepted history remains intact.
+The scanner does not guess ownership from timestamps or equal token counts.
+Native subagent session kinds are excluded because their spend is folded into
+the parent ledger. This is exact accounting for supported unforked top-level
+history, not universal fork attribution.
+
+Each source JSON document is limited to 16 MiB. Candidates are limited to 1 GiB
+and 1,048,576 records. Retained cache and scratch together are limited to 8 GiB
+of logical bytes, 1,048,576 filesystem entries and 8,388,608 persisted lines.
+Admission precedes file creation and writes; limits fail explicitly without
+evicting retained history. Sorting uses bounded chunks and on-disk merge runs;
+continuation pages read immutable snapshots. Each scan builds a private generation
+of source artifacts, binding their fingerprints and parsed records together.
+An exact manifest identifies retained artifacts by source key and content digest;
+one durable pointer selects the accepted generation after the scan is complete.
+Cancelled or rejected candidate scans cannot modify accepted retained history.
+A filesystem sync failure after pointer replacement reports an indeterminate
+commit outcome and preserves both generations.
+
+The SDK source dependency tracks the owned Logonomic `master` branch. Set
+`LOGONOMIC_CLI_ADDON_SDK_SOURCE` to a local `sdk/logonomic_cli_addon_sdk` directory
+for coordinated development. `grok_package` produces the indexed package under
+`package/logonomic.cli.grok` in a single-configuration build directory, or
+`package/<config>/logonomic.cli.grok` with a multi-configuration generator.
+Follow workstation build
+queue and toolchain instructions for configuration and compilation. CTest
+registers runtime, account/probe, usage, package-validation and conformance
+fixtures. Building a package does not activate it or migrate user data.
+
+The package recipe proves the Windows/Linux x86-64 compiler target during
+configuration. `cmake --install` exports a fresh artifact beneath its install-time
+prefix and preserves executable permissions. An existing per-package destination,
+including a dangling symlink, is refused. POSIX `DESTDIR` staging is supported;
+nonempty `DESTDIR` with a drive-letter prefix is refused. Export is not atomic:
+a failure may leave a partial artifact directory. Choose a fresh destination or
+manually remove only that identified disposable export before retrying; never
+remove an installed generation this way. The application's package ingestion
+owns atomic installation and updates.
+
+The upstream source revision and contract locations are recorded in
+`package/provenance/upstream_contract.json`. The bundled geometric letter icons
+are original package artwork.

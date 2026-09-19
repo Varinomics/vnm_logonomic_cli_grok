@@ -1,0 +1,11 @@
+{
+  "capability_id": "managed-configuration",
+  "version": 2,
+  "payload": {
+    "environment_name": "GROK_HOME",
+    "relative_path": "hooks/logonomic.json",
+    "default_home_relative_path": ".grok",
+    "selector_policy": "raw",
+    "default_home_policy": "canonical-home"
+  }
+}

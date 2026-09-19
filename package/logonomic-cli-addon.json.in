@@ -1,0 +1,13 @@
+{
+  "bootstrap_version": 1,
+  "package_id": "logonomic.cli.grok",
+  "release_version": "@PROJECT_VERSION@",
+  "platforms": ["@GROK_PLATFORM@"],
+  "adapter": {
+    "path": {"@GROK_PLATFORM@": "adapter/grok_adapter@GROK_EXECUTABLE_SUFFIX@"},
+    "argv": [],
+    "environment": {}
+  },
+  "core_protocol_generations": [1],
+  "integrity_index": "package.files.json"
+}

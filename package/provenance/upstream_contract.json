@@ -1,0 +1,36 @@
+{
+  "provider": "Grok Build",
+  "source": "https://github.com/xai-org/grok-build",
+  "source_snapshot": "37949780c144e37df692e3d669051a21fec24f20",
+  "source_license": "Apache-2.0",
+  "contracts": [
+    "crates/codegen/xai-dirs/src/lib.rs",
+    "crates/codegen/xai-grok-pager/src/models.rs",
+    "crates/codegen/xai-grok-shell/src/extensions/billing.rs",
+    "crates/codegen/xai-grok-shell/src/session/usage_file.rs",
+    "crates/codegen/xai-grok-shell/src/session/storage/jsonl/copy.rs",
+    "crates/codegen/xai-grok-shell/src/session/acp_session_impl/stop_gate.rs",
+    "crates/codegen/xai-grok-config/src/global_hook_sources.rs",
+    "crates/codegen/xai-grok-hooks/src/event.rs",
+    "crates/codegen/xai-grok-hooks/src/env_expand.rs",
+    "crates/codegen/xai-grok-hooks/src/runner/command.rs",
+    "crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs",
+    "crates/codegen/xai-grok-shell/src/extensions/mcp.rs",
+    "crates/codegen/xai-grok-shell/src/agent/mvp_agent/session_setup.rs",
+    "crates/codegen/xai-grok-shell/src/agent/mvp_agent/session_lifecycle.rs"
+  ],
+  "forward_policy": "The source snapshot records evidence, not an upper version bound. Incoming protocol and persisted records undergo structural and identity validation.",
+  "icons": "Original Varinomics geometric letter marks; not upstream trademarks.",
+  "acp_wire_dependency": {
+    "crate": "agent-client-protocol",
+    "version": "0.10.4",
+    "sha256": "10eeef5e80864f9c3c148a3f395c3e35a66d37ec7561c7845b2bffae8e841759",
+    "source": "https://static.crates.io/crates/agent-client-protocol/agent-client-protocol-0.10.4.crate",
+    "wire_rule": "src/lib.rs ext_method and ext_notification both prepend underscore; receive dispatch strips it."
+  },
+  "documentation": [
+    "https://docs.x.ai/build/overview",
+    "https://docs.x.ai/build/cli/reference",
+    "https://docs.x.ai/build/features/hooks"
+  ]
+}
