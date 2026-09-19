@@ -57,7 +57,7 @@ target_link_libraries(grok_adapter PRIVATE grok_provider)
 grok_target(grok_adapter)
 add_executable(grok_helper src/grok_helper.cpp)
 grok_target(grok_helper)
-add_executable(grok_launch_bridge src/grok_launch_bridge.cpp)
+logonomic_cli_addon_add_launch_bridge(grok_launch_bridge)
 grok_target(grok_launch_bridge)
 
 logonomic_cli_addon_package_platform(GROK_PLATFORM)
