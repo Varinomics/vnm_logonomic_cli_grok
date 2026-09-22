@@ -124,6 +124,11 @@ void exercise()
         overage.observation->secondary->used_percent == 150.0 && overage.observation->credits_balance == "-1.25" &&
         addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(overage, 2), request.inspection.final, &failure, 2).has_value(),
         "cents-derived primary and on-demand overages and signed balances survive host decoding");
+    request.inspection.stdout_bytes = R"({"id":2,"result":{"config":{"onDemandCap":{"val":0}},"subscription_tier":"SuperGrok Lite"}})" "\n";
+    const auto unmetered = grok::inspect_quota(request);
+    check(unmetered.complete && unmetered.observation->state == addon::Quota_status::UNAVAILABLE &&
+        addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(unmetered, 2), request.inspection.final, &failure, 2).has_value(),
+        "a plan whose billing reply meters nothing reports quota unavailable, not ready without values");
     request.inspection.stdout_bytes = R"({"id":2,"error":{"code":-32603,"message":"secret diagnostic"}})" "\n";
     const auto failed = grok::inspect_quota(request);
     check(failed.complete && failed.observation->state == addon::Quota_status::FAILED,

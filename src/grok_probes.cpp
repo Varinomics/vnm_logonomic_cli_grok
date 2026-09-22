@@ -163,6 +163,13 @@ addon::Quota_inspect_result inspect_quota(const addon::Probe_inspect_request& re
         }
         const auto& plan = member(payload, "subscription_tier");
         if (plan.is_string() && !plan.as_string().empty()) observation.plan = plan.as_string();
+        // A plan can meter nothing this reply reports: SuperGrok Lite has no
+        // usage allowance and a zero on-demand cap. Its quota is unavailable,
+        // and an unavailable observation carries no values, the plan included.
+        if (!observation.primary && !observation.secondary && !observation.credits_balance) {
+            observation.state = addon::Quota_status::UNAVAILABLE;
+            observation.plan.reset();
+        }
         result.complete = true;
         result.observation = observation;
         return result;
