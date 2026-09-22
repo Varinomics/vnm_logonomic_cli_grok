@@ -2,9 +2,11 @@
 #include "grok_probes.h"
 #include "grok_launcher.h"
 
+#include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/package_source.h>
 
 #include <iostream>
+#include <optional>
 #include <filesystem>
 #include <chrono>
 #include <stdexcept>
@@ -134,9 +136,67 @@ void exercise()
     check(failed.complete && failed.observation->state == addon::Quota_status::FAILED,
         "upstream failure is explicit and raw diagnostics are not propagated");
 }
+class Context final : public addon::Invocation_context
+{
+public:
+    addon::Invoke_request input;
+    addon::Json_value output;
+    bool succeeded = false;
+    bool done = false;
+    const addon::Invoke_request& request() const override { return input; }
+    bool cancel_requested() const override { return false; }
+    bool wait_for_cancel(int) override { return false; }
+    void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
+    void succeed(addon::Json_value value) override { succeeded = true; done = true; output = std::move(value); }
+    void fail(addon::Result_status, std::string, std::string) override { done = true; }
+    bool finished() const override { return done; }
+};
+void accounts_are_named_after_their_profile_folders()
+{
+    // Oracle: accounts@1 names an account with a filesystem profile after that
+    // profile's folder, which tells it apart from the provider's other accounts.
+#if defined(_WIN32)
+    const std::string platform = "windows-x86_64";
+    const std::string home     = "C:/Users/Jane Doe";
+    const std::string home_env = "USERPROFILE";
+#else
+    const std::string platform = "linux-x86_64";
+    const std::string home     = "/home/jane";
+    const std::string home_env = "HOME";
+#endif
+    const auto discovered_name = [&](const char* grok_home) {
+        addon::Accounts_launcher_request request;
+        request.launcher.script_body = "grok";
+        request.launcher.runner_key  = addon::k_runner_direct;
+        request.launch_environment.platform_id = platform;
+        request.launch_environment.effective_environment = addon::Json_value::object();
+        request.launch_environment.effective_environment.set(home_env, addon::Json_value(home));
+        if (grok_home) request.launch_environment.effective_environment.set("GROK_HOME", addon::Json_value(grok_home));
+        request.default_home_fallback   = home;
+        request.normalization_directory = home;
+        Context context;
+        context.input.operation = addon::k_accounts_discover_operation;
+        context.input.payload   = addon::encode_accounts_launcher_request(request);
+        grok::handle_accounts(context);
+        addon::Contract_failure failure;
+        const auto accounts = addon::decode_accounts_result(context.output, &failure);
+        check(context.succeeded && accounts && accounts->size() == 1, "discovery returns the selected account");
+        return accounts->front().display_name;
+    };
+    check(discovered_name(nullptr) == ".grok", "the default profile is named .grok");
+    check(discovered_name((home + "/.grok-work").c_str()) == ".grok-work", "a GROK_HOME profile is named after its folder");
+    check(discovered_name((home + "/.grok-work/").c_str()) == ".grok-work", "a trailing separator does not hide the folder name");
+    check(discovered_name((home + "/profiles/link/../.grok-work").c_str()) == ".grok-work",
+        "parent traversal inside GROK_HOME does not change the folder name");
+    check(discovered_name((home + "/.grok-review").c_str()) != discovered_name((home + "/.grok-work").c_str()),
+        "two profiles of one provider are named apart");
+    const std::string long_home = home + "/.grok-account-for-the-varinomics-nightly-release-builds";
+    check(discovered_name(long_home.c_str()) == addon::account_display_name(long_home),
+        "an over-long folder name is fitted by the SDK's account display-name rule");
+}
 } // namespace
 int main()
 {
-    try { exercise(); return 0; }
+    try { exercise(); accounts_are_named_after_their_profile_folders(); return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

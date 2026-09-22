@@ -170,7 +170,7 @@ void handle_accounts(addon::Invocation_context& context)
         addon::Account_record account;
         account.adapter_account_key = selected->adapter_account_key;
         account.profile_path = selected->profile_path;
-        account.display_name = "Grok Build";
+        account.display_name = addon::account_display_name(selected->profile_path);
         account.status = exists ? addon::Account_status::AVAILABLE : addon::Account_status::UNAVAILABLE;
         context.succeed(addon::encode_accounts({account}));
     }
