@@ -1,0 +1,16 @@
+{
+  "upstream": "https://github.com/lobehub/lobe-icons",
+  "snapshot": "4aaf4ee1fb2678a7f989ea570f0f6ce14a9abf75",
+  "source_path": "packages/static-svg/icons/grok.svg",
+  "source_sha256": "9175fc90c22655160231976c849f25a03b888d7cc0e04c5f1b987b659bb07c95",
+  "notice": "notices/lobe_icons_mit.txt",
+  "resources": [
+    "assets/grok.svg",
+    "assets/grok-dark.svg"
+  ],
+  "changes": [
+    "Replaced the root currentColor fill with fixed black in grok.svg and fixed white in grok-dark.svg for the light and dark variants.",
+    "Removed root browser-layout style flex:none;line-height:1 and replaced root width/height 1em with numeric 24. All viewBox, path and fill-rule data are preserved."
+  ],
+  "provenance_basis": "The product owner supplied grok.svg on 2026-09-22. Its bytes equal source_path at snapshot, which this record uses as the reproducible source reference."
+}

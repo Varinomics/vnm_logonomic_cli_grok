@@ -85,5 +85,8 @@ remove an installed generation this way. The application's package ingestion
 owns atomic installation and updates.
 
 The upstream source revision and contract locations are recorded in
-`package/provenance/upstream_contract.json`. The bundled geometric letter icons
-are original package artwork.
+`package/provenance/upstream_contract.json`. The Grok icons derive from Lobe
+Icons and retain the packaged MIT notice in `package/notices/lobe_icons_mit.txt`;
+per-resource source and normalization details are in
+`package/provenance/lobe_icons.json`. Grok names and marks identify the
+independent upstream software; they do not imply endorsement.

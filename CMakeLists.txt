@@ -79,7 +79,8 @@ configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon
 file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/package/assets/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance/*")
+    "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/package/notices/*")
 # Directory membership is an input too: removing a resource, or adding one
 # with an older timestamp, must rebuild the indexed package. file(GENERATE)
 # changes this file only when membership changes, preserving no-op builds.
@@ -93,11 +94,17 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/assets" "${GROK_PACKAGE_DIRECTORY}/assets"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities" "${GROK_PACKAGE_DIRECTORY}/capabilities"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance" "${GROK_PACKAGE_DIRECTORY}/provenance"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/package/notices" "${GROK_PACKAGE_DIRECTORY}/notices"
     COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${GROK_PACKAGE_DIRECTORY}/logonomic-cli-addon.json"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_adapter>" "${GROK_PACKAGE_DIRECTORY}/adapter/grok_adapter${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_helper>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_helper${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_launch_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_launch_bridge${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "$<TARGET_FILE:logonomic_cli_addon_index>" "${GROK_PACKAGE_DIRECTORY}"
+        --third-party "assets/grok.svg" "notices/lobe_icons_mit.txt"
+            "provenance/lobe_icons.json"
+        --third-party "assets/grok-dark.svg" "notices/lobe_icons_mit.txt"
+            "provenance/lobe_icons.json"
     DEPENDS grok_adapter grok_helper grok_launch_bridge logonomic_cli_addon_index
         "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
     VERBATIM)

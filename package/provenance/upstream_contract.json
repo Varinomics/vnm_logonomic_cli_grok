@@ -20,7 +20,11 @@
     "crates/codegen/xai-grok-shell/src/agent/mvp_agent/session_lifecycle.rs"
   ],
   "forward_policy": "The source snapshot records evidence, not an upper version bound. Incoming protocol and persisted records undergo structural and identity validation.",
-  "icons": "Original Varinomics geometric letter marks; not upstream trademarks.",
+  "icons": {
+    "upstream": "https://github.com/lobehub/lobe-icons",
+    "license": "MIT",
+    "notice": "notices/lobe_icons_mit.txt"
+  },
   "acp_wire_dependency": {
     "crate": "agent-client-protocol",
     "version": "0.10.4",
