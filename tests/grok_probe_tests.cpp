@@ -99,42 +99,68 @@ void exercise()
 
     request = {};
     request.inspection.protocol_state = "await_initialize";
-    request.inspection.stdout_bytes = R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}})" "\n";
-    const auto step = grok::inspect_quota(request);
-    check(!step.complete && step.stdin_bytes && step.stdin_bytes->find("_x.ai/billing") != std::string::npos,
-        "quota issues only the native read-only billing RPC after initialization");
-    request.inspection.protocol_state = step.protocol_state;
-    request.inspection.stdout_bytes = R"({"id":2,"result":{"config":{"creditUsagePercent":63.5,"monthlyLimit":{"val":10000},"used":{"val":9000},"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-09-20T12:00:00Z"},"prepaidBalance":{"val":1234}},"subscription_tier":"SuperGrok"}})" "\n";
+    request.inspection.stdout_bytes = R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"id":"cached_token"},{"id":"grok.com"}]}})" "\n";
+    const auto authentication = grok::inspect_quota(request);
+    check(!authentication.complete && authentication.protocol_state == "await_authenticate" &&
+        authentication.stdin_bytes && authentication.stdin_bytes->find(
+            R"("method":"authenticate","params":{"methodId":"cached_token"})") != std::string::npos,
+        "quota authenticates only with Grok's cached non-interactive login");
+    request.inspection.protocol_state = authentication.protocol_state;
+    request.inspection.stdout_bytes += R"({"id":2,"result":{}})" "\n";
+    const auto billing = grok::inspect_quota(request);
+    check(!billing.complete && billing.protocol_state == "await_quota" && billing.stdin_bytes &&
+        billing.stdin_bytes->find(R"("id":3,"method":"_x.ai/billing")") != std::string::npos,
+        "quota is queried only after cached-token authentication succeeds");
+    request.inspection.protocol_state = billing.protocol_state;
+    request.inspection.stdout_bytes += R"({"id":3,"result":{"config":{"creditUsagePercent":63.5,"monthlyLimit":{"val":10000},"used":{"val":9000},"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-09-20T12:00:00Z"},"prepaidBalance":{"val":1234}},"subscription_tier":"SuperGrok"}})" "\n";
     const auto quota = grok::inspect_quota(request);
     check(quota.complete && quota.observation->state == addon::Quota_status::READY &&
-        quota.observation->primary->used_percent == 63.5 && quota.observation->credits_balance == "12.34",
-        "native percentage wins over deprecated cents and prepaid cents stay exact");
+        quota.observation->primary->used_percent == 63.5 &&
+        quota.observation->primary->label == "Weekly" &&
+        quota.observation->primary->reset_text == "2026-09-20T12:00:00Z" &&
+        !quota.observation->secondary && !quota.observation->credits_balance && !quota.observation->plan,
+        "quota reports its usage window without exposing credit or plan details");
     addon::Contract_failure failure;
     check(addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(quota, 2), request.inspection.final, &failure, 2).has_value(),
-        "native quota observation satisfies the host decimal credit contract");
+        "native quota observation satisfies the host contract");
     for (const double percent : {-7.5, 125.0}) {
-        request.inspection.stdout_bytes = "{\"id\":2,\"result\":{\"config\":{\"creditUsagePercent\":" +
+        request.inspection.stdout_bytes = "{\"id\":3,\"result\":{\"config\":{\"creditUsagePercent\":" +
             std::to_string(percent) + "}}}\n";
         const auto observation = grok::inspect_quota(request);
         check(observation.observation->primary->used_percent == percent &&
             addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(observation, 2), request.inspection.final, &failure, 2).has_value(),
             "quota-scan preserves every finite signed percentage without saturation");
     }
-    request.inspection.stdout_bytes = R"({"id":2,"result":{"config":{"monthlyLimit":{"val":10000},"used":{"val":15000},"onDemandCap":{"val":2000},"onDemandUsed":{"val":3000},"prepaidBalance":{"val":-125}}}})" "\n";
+    request.inspection.stdout_bytes = R"({"id":3,"result":{"config":{"monthlyLimit":{"val":10000},"used":{"val":15000},"onDemandCap":{"val":2000},"onDemandUsed":{"val":3000},"prepaidBalance":{"val":-125}}}})" "\n";
     const auto overage = grok::inspect_quota(request);
-    check(overage.observation->primary->used_percent == 150.0 &&
-        overage.observation->secondary->used_percent == 150.0 && overage.observation->credits_balance == "-1.25" &&
+    check(overage.observation->state == addon::Quota_status::UNAVAILABLE && !overage.observation->primary &&
+        !overage.observation->secondary && !overage.observation->credits_balance && !overage.observation->plan &&
         addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(overage, 2), request.inspection.final, &failure, 2).has_value(),
-        "cents-derived primary and on-demand overages and signed balances survive host decoding");
-    request.inspection.stdout_bytes = R"({"id":2,"result":{"config":{"onDemandCap":{"val":0}},"subscription_tier":"SuperGrok Lite"}})" "\n";
+        "financial totals alone do not masquerade as provider quota");
+    request.inspection.stdout_bytes = R"({"id":3,"result":{"config":{"onDemandCap":{"val":0}},"subscription_tier":"SuperGrok Lite"}})" "\n";
     const auto unmetered = grok::inspect_quota(request);
     check(unmetered.complete && unmetered.observation->state == addon::Quota_status::UNAVAILABLE &&
         addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(unmetered, 2), request.inspection.final, &failure, 2).has_value(),
         "a plan whose billing reply meters nothing reports quota unavailable, not ready without values");
-    request.inspection.stdout_bytes = R"({"id":2,"error":{"code":-32603,"message":"secret diagnostic"}})" "\n";
+    request.inspection.stdout_bytes = R"({"id":3,"error":{"code":-32603,"message":"secret diagnostic"}})" "\n";
     const auto failed = grok::inspect_quota(request);
     check(failed.complete && failed.observation->state == addon::Quota_status::FAILED,
         "upstream failure is explicit and raw diagnostics are not propagated");
+
+    request = {};
+    request.inspection.protocol_state = "await_initialize";
+    request.inspection.stdout_bytes = R"({"id":1,"result":{"protocolVersion":1,"authMethods":[{"id":"grok.com"}]}})" "\n";
+    const auto no_cached_login = grok::inspect_quota(request);
+    check(no_cached_login.complete && no_cached_login.observation->state == addon::Quota_status::NOT_LOGGED_IN &&
+        !no_cached_login.stdin_bytes,
+        "quota does not open an interactive login when no cached token is available");
+
+    request.inspection.protocol_state = "await_authenticate";
+    request.inspection.stdout_bytes += R"({"id":2,"error":{"code":-32000,"message":"authentication unavailable"}})" "\n";
+    const auto authentication_failed = grok::inspect_quota(request);
+    check(authentication_failed.complete && authentication_failed.observation->state == addon::Quota_status::NOT_LOGGED_IN &&
+        !authentication_failed.stdin_bytes,
+        "failed cached authentication does not query quota");
 }
 class Context final : public addon::Invocation_context
 {

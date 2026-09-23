@@ -2,6 +2,7 @@
 #include "grok_accounts.h"
 #include "grok_launcher.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cctype>
@@ -93,97 +94,79 @@ addon::Auth_inspect_result inspect_auth(const addon::Probe_inspect_request& requ
 addon::Quota_inspect_result inspect_quota(const addon::Probe_inspect_request& request)
 {
     addon::Quota_inspect_result result;
-    const auto fail = [&] {
+    const auto observe_status = [&](addon::Quota_status status) {
         result.complete = true;
         addon::Quota_observation observation;
         observation.scope = scope(request);
-        observation.state = addon::Quota_status::FAILED;
+        observation.state = status;
         result.observation = std::move(observation);
         return result;
     };
-    if (const auto response = response_for_id(request.inspection.stdout_bytes, 2)) {
-        if (response->find("error")) return fail();
-        const auto& payload = member(*response, "result");
-        const auto& config = member(payload, "config");
-        if (!config.is_object()) return fail();
-        for (const auto name : {"monthlyLimit", "used", "onDemandCap", "onDemandUsed", "prepaidBalance"}) {
-            const auto& item = member(config, name);
-            if (!item.is_null() && (!item.is_object() ||
-                (!member(item, "val").is_null() && !member(item, "val").is_integer()))) return fail();
-        }
-        const auto cents = [&](std::string_view name) -> std::optional<std::int64_t> {
-            const auto& item = member(config, name);
-            if (item.is_null()) return {};
-            const auto& value = member(item, "val");
-            if (item.is_object() && value.is_null()) return 0;
-            if (!value.is_integer()) return {};
-            return value.as_integer();
-        };
-        const auto limit = cents("monthlyLimit");
-        const auto used = cents("used");
-        const auto& percent = member(config, "creditUsagePercent");
-        std::optional<double> usage;
-        if (!percent.is_null()) {
-            if (!percent.is_number() || !std::isfinite(percent.as_number())) return fail();
-            usage = percent.as_number();
-        }
-        else
-        if (limit && *limit > 0 && used) usage = static_cast<double>(*used) / *limit * 100;
-        addon::Quota_observation observation;
-        observation.scope = scope(request);
-        observation.state = addon::Quota_status::READY;
-        if (usage) {
-            addon::Quota_window window;
-            window.used_percent = *usage;
-            const auto& period = member(config, "currentPeriod");
-            const auto& type = member(period, "type");
-            if (type.is_string()) {
-                if (type.as_string() == "USAGE_PERIOD_TYPE_WEEKLY") window.label = "Weekly";
-                if (type.as_string() == "USAGE_PERIOD_TYPE_MONTHLY") window.label = "Monthly";
+    const auto fail = [&] {
+        return observe_status(addon::Quota_status::FAILED);
+    };
+    const auto& protocol_state = request.inspection.protocol_state;
+    if (protocol_state == "await_quota") {
+        if (const auto response = response_for_id(request.inspection.stdout_bytes, 3)) {
+            if (response->find("error")) return fail();
+            const auto& config = member(member(*response, "result"), "config");
+            if (!config.is_object()) return fail();
+            const auto& percent = member(config, "creditUsagePercent");
+            std::optional<double> usage;
+            if (!percent.is_null()) {
+                if (!percent.is_number() || !std::isfinite(percent.as_number())) return fail();
+                usage = percent.as_number();
             }
-            const auto& end = member(period, "end").is_string() ? member(period, "end") : member(config, "billingPeriodEnd");
-            if (end.is_string()) window.reset_text = end.as_string();
-            observation.primary = window;
-        }
-        const auto cap = cents("onDemandCap");
-        if (cap && *cap > 0) {
-            auto demand = cents("onDemandUsed");
-            if (!demand && used && limit && *used >= 0 && *limit >= 0) demand = *used > *limit ? *used - *limit : 0;
-            if (demand) {
+
+            addon::Quota_observation observation;
+            observation.scope = scope(request);
+            observation.state = usage ? addon::Quota_status::READY : addon::Quota_status::UNAVAILABLE;
+            if (usage) {
                 addon::Quota_window window;
-                window.used_percent = static_cast<double>(*demand) / *cap * 100;
-                window.label = "On-demand";
-                observation.secondary = window;
+                window.used_percent = *usage;
+                const auto& period = member(config, "currentPeriod");
+                const auto& type = member(period, "type");
+                if (type.is_string()) {
+                    if (type.as_string() == "USAGE_PERIOD_TYPE_WEEKLY") window.label = "Weekly";
+                    if (type.as_string() == "USAGE_PERIOD_TYPE_MONTHLY") window.label = "Monthly";
+                }
+                const auto& end = member(period, "end").is_string() ? member(period, "end") : member(config, "billingPeriodEnd");
+                if (end.is_string()) window.reset_text = end.as_string();
+                observation.primary = window;
             }
+            result.complete = true;
+            result.observation = std::move(observation);
+            return result;
         }
-        if (const auto credit = cents("prepaidBalance")) {
-            const auto magnitude = *credit < 0 ? std::uint64_t(-(*credit + 1)) + 1 : std::uint64_t(*credit);
-            observation.credits_balance = (*credit < 0 ? "-" : "") + std::to_string(magnitude / 100) + "." +
-                (magnitude % 100 < 10 ? "0" : "") + std::to_string(magnitude % 100);
-        }
-        const auto& plan = member(payload, "subscription_tier");
-        if (plan.is_string() && !plan.as_string().empty()) observation.plan = plan.as_string();
-        // A plan can meter nothing this reply reports: SuperGrok Lite has no
-        // usage allowance and a zero on-demand cap. Its quota is unavailable,
-        // and an unavailable observation carries no values, the plan included.
-        if (!observation.primary && !observation.secondary && !observation.credits_balance) {
-            observation.state = addon::Quota_status::UNAVAILABLE;
-            observation.plan.reset();
-        }
-        result.complete = true;
-        result.observation = observation;
-        return result;
     }
-    if (!request.inspection.final && request.inspection.protocol_state == "await_initialize") {
+    else
+    if (protocol_state == "await_authenticate") {
+        if (const auto response = response_for_id(request.inspection.stdout_bytes, 2)) {
+            if (response->find("error")) return observe_status(addon::Quota_status::NOT_LOGGED_IN);
+            result.protocol_state = "await_quota";
+            result.stdin_bytes = R"({"jsonrpc":"2.0","id":3,"method":"_x.ai/billing","params":{}})" "\n";
+            return result;
+        }
+    }
+    else
+    if (protocol_state == "await_initialize") {
         if (const auto response = response_for_id(request.inspection.stdout_bytes, 1)) {
             if (response->find("error") || !member(*response, "result").is_object()) return fail();
-            result.protocol_state = "await_quota";
-            result.stdin_bytes = R"({"jsonrpc":"2.0","id":2,"method":"_x.ai/billing","params":{}})" "\n";
+            const auto& methods = member(member(*response, "result"), "authMethods");
+            if (!methods.is_array()) return observe_status(addon::Quota_status::NOT_LOGGED_IN);
+            const auto cached_token_available = std::any_of(methods.as_array().begin(), methods.as_array().end(),
+                [](const addon::Json_value& method) {
+                    const auto& identifier = member(method, "id");
+                    return identifier.is_string() && identifier.as_string() == "cached_token";
+                });
+            if (!cached_token_available) return observe_status(addon::Quota_status::NOT_LOGGED_IN);
+            result.protocol_state = "await_authenticate";
+            result.stdin_bytes = R"({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"cached_token"}})" "\n";
             return result;
         }
     }
     if (request.inspection.final) return fail();
-    result.protocol_state = request.inspection.protocol_state;
+    result.protocol_state = protocol_state;
     return result;
 }
 
