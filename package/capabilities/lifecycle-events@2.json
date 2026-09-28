@@ -7,9 +7,9 @@
     "turn_origin_correlation": "unsupported",
     "features": {
       "root_turn_start": "supported",
-      "root_turn_completion": "unsupported",
+      "root_turn_completion": "supported",
       "subagents": "unsupported",
-      "confirmed_phase_status": "unsupported",
+      "confirmed_phase_status": "supported",
       "attention": "unsupported",
       "cooperative_description": "unsupported",
       "blockable_completion": "unsupported",
