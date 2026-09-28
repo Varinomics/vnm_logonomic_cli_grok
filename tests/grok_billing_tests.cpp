@@ -292,8 +292,6 @@ void response_interpretation()
 
     g_service.billing = ok(R"({"config":null})");
     check(state_of(fetch(profile)) == Quota_status::UNAVAILABLE, "a reply without a credits config meters nothing");
-    g_service.billing = ok(credits_config(week, "42.5", "USAGE_PERIOD_TYPE_MONTHLY"));
-    check(state_of(fetch(profile)) == Quota_status::UNAVAILABLE, "a period other than weekly is not reported");
     const Period ended{week.start - std::chrono::days(14), week.start - std::chrono::days(7)};
     g_service.billing = ok(credits_config(ended, "42.5"));
     check(state_of(fetch(profile)) == Quota_status::UNAVAILABLE, "a period that has ended is not reported");
@@ -306,6 +304,94 @@ void response_interpretation()
     check(state_of(fetch(profile)) == Quota_status::FAILED,
         "figures fetched with a credential Grok replaced meanwhile are not reported");
     g_service.while_billing = nullptr;
+}
+
+void non_weekly_periods()
+{
+    Profile profile;
+    write_file(profile.path() / "auth.json", auth_json(Clock::now() + std::chrono::hours(1)));
+    g_service.settings = settings_tier("SuperGrok");
+    const auto start = current_week().start;
+    unsigned failures = 0;
+    // UsagePeriod in grok-build's billing.rs supplies RFC3339 boundaries;
+    // credit_bar.rs tests the MONTHLY enum. A calendar month is not a fixed
+    // number of minutes. Shift each fixture around now as for the weekly one.
+    for (const int days : {28, 29, 30, 31}) {
+        for (const auto& [text, percent] : {std::pair{"-7.5", -7.5}, std::pair{"125.0", 125.0}}) {
+            const Period month{start, start + std::chrono::days(days)};
+            g_service.billing = ok(credits_config(month, text, "USAGE_PERIOD_TYPE_MONTHLY"));
+            const auto result = fetch(profile);
+            const bool correct =
+                state_of(result) == Quota_status::READY && result.observation->primary &&
+                result.observation->primary->window_minutes == std::uint64_t(days * 24 * 60) &&
+                result.observation->primary->resets_at_ms == epoch_ms(month.end) &&
+                result.observation->primary->used_percent == percent &&
+                !result.observation->primary->label && !result.observation->primary->reset_text &&
+                decodes_as_quota_2(result);
+            if (!correct) {
+                std::cerr << "monthly fixture " << days << " days, " << percent << "% failed\n";
+                ++failures;
+            }
+        }
+    }
+    const Period month{start, start + std::chrono::days(30)};
+    auto fractional = credits_config(month, "42.5", "USAGE_PERIOD_TYPE_MONTHLY");
+    for (const auto boundary : {month.start, month.end}) {
+        const auto position = fractional.find(rfc3339(boundary));
+        fractional.replace(position, rfc3339(boundary).size(), rfc3339(boundary, ".125"));
+    }
+    g_service.billing = ok(fractional);
+    const auto precise = fetch(profile);
+    if (state_of(precise) != Quota_status::READY || !precise.observation->primary ||
+        precise.observation->primary->window_minutes != std::uint64_t{30 * 24 * 60} ||
+        precise.observation->primary->resets_at_ms != epoch_ms(month.end) + 125)
+    {
+        std::cerr << "monthly millisecond reset fixture failed\n";
+        ++failures;
+    }
+    // A type name is not needed to measure a period whose boundaries are
+    // supplied. This also covers exact minute lengths that are not whole days.
+    const Period other{start, start + std::chrono::minutes(43201)};
+    g_service.billing = ok(credits_config(other, "42.5", "USAGE_PERIOD_TYPE_UNSPECIFIED"));
+    const auto measured = fetch(profile);
+    if (state_of(measured) != Quota_status::READY || !measured.observation->primary ||
+        measured.observation->primary->window_minutes != std::uint64_t{43201})
+    {
+        std::cerr << "non-weekly exact minute fixture failed\n";
+        ++failures;
+    }
+    // The old weekly constant also hid invalid or unrepresentable intervals.
+    for (const Period invalid : {
+            Period{month.end + std::chrono::days(1), month.end}, Period{month.end, month.end},
+            Period{month.end, month.end + std::chrono::days(7)},
+            Period{start, month.end + std::chrono::seconds(1)}})
+    {
+        g_service.billing = ok(credits_config(invalid, "42.5"));
+        if (state_of(fetch(profile)) != Quota_status::UNAVAILABLE) {
+            std::cerr << "invalid or fractional-minute period fixture failed\n";
+            ++failures;
+        }
+    }
+    auto submillisecond = credits_config(month, "42.5");
+    const auto end_position = submillisecond.find(rfc3339(month.end));
+    submillisecond.replace(end_position, rfc3339(month.end).size(), rfc3339(month.end, ".0001"));
+    g_service.billing = ok(submillisecond);
+    if (state_of(fetch(profile)) != Quota_status::UNAVAILABLE) {
+        std::cerr << "submillisecond reset fixture failed\n";
+        ++failures;
+    }
+    for (const auto percent : {"", "null"}) {
+        g_service.billing = ok(credits_config(month, percent, "USAGE_PERIOD_TYPE_MONTHLY"));
+        g_service.settings = settings_tier("SuperGrok");
+        const auto with_settings = state_of(fetch(profile));
+        g_service.settings = grok::Billing_http_response{503, "{}"};
+        const auto without_settings = state_of(fetch(profile));
+        if (with_settings != Quota_status::UNAVAILABLE || without_settings != Quota_status::UNAVAILABLE) {
+            std::cerr << "monthly missing percentage '" << percent << "' depends on settings failure\n";
+            ++failures;
+        }
+    }
+    check(failures == 0, "period fixtures preserve exact length, reset and native percentage");
 }
 
 } // namespace
@@ -335,6 +421,7 @@ int main()
     try {
         credential_parsing();
         response_interpretation();
+        non_weekly_periods();
         return 0;
     }
     catch (const std::exception& error) {

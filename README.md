@@ -10,8 +10,11 @@ completion. Quota inspection reads the selected profile's current public xAI
 OIDC credential and calls Grok's fixed HTTPS billing and settings endpoints.
 The bearer stays in the short-lived helper's memory and request headers; the
 package does not refresh or write Grok credentials. Custom auth, team, and
-proxy routes are unavailable for this quota probe. The weekly window reports
-Grok's own percentage, which may exceed 100, and its reset time. While the
+proxy routes are unavailable for this quota probe. The usage window reports
+Grok's own percentage, which may exceed 100, its actual period length and its
+reset time. Monthly periods retain their actual number of days; periods that
+cannot be expressed exactly in whole minutes with a millisecond reset are
+unavailable. While the
 selected profile's credential is expired, each quota refresh fails until Grok
 itself refreshes the credential. On Linux the helper uses libcurl, so building
 the package needs its development files.

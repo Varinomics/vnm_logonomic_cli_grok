@@ -24,10 +24,8 @@ namespace {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 
-// Grok's credits config names its weekly usage period by this enum value. The
-// host names a window by its length, so the week reads as "7d".
+// Only the established weekly paid-plan case implies zero when usage is absent.
 constexpr std::string_view k_weekly_period = "USAGE_PERIOD_TYPE_WEEKLY";
-constexpr std::uint64_t    k_week_minutes  = 7 * 24 * 60;
 
 struct Credential
 {
@@ -35,7 +33,7 @@ struct Credential
     std::string              bearer;
     std::string              user_id;
     std::string              principal_id;
-    std::chrono::sys_seconds expires_at;
+    std::chrono::sys_time<std::chrono::milliseconds> expires_at;
 };
 
 const addon::Json_value& member(const addon::Json_value& object, std::string_view name)
@@ -97,7 +95,8 @@ bool custom_auth_or_route(const fs::path& profile)
     return false;
 }
 
-std::optional<std::chrono::sys_seconds> timestamp(std::string_view text)
+std::optional<std::chrono::sys_time<std::chrono::milliseconds>> timestamp(
+    std::string_view text, bool exact_milliseconds = false)
 {
     using namespace std::chrono;
     if (text.size() < 20 || text.size() > 40 || text[4] != '-' || text[7] != '-' ||
@@ -118,10 +117,20 @@ std::optional<std::chrono::sys_seconds> timestamp(std::string_view text)
         std::chrono::day(static_cast<unsigned>(*day_value))};
     if (!day.ok()) return std::nullopt;
     std::size_t position = 19;
+    int fraction_ms = 0;
     if (position < text.size() && text[position] == '.') {
         ++position;
         const auto fraction_start = position;
-        while (position < text.size() && text[position] >= '0' && text[position] <= '9') ++position;
+        int place = 100;
+        while (position < text.size() && text[position] >= '0' && text[position] <= '9') {
+            const int digit = text[position] - '0';
+            if (exact_milliseconds && place == 0 && digit != 0) {
+                return std::nullopt;
+            }
+            fraction_ms += digit * place;
+            place /= 10;
+            ++position;
+        }
         if (position == fraction_start) return std::nullopt;
     }
     int offset_minutes = 0;
@@ -136,7 +145,7 @@ std::optional<std::chrono::sys_seconds> timestamp(std::string_view text)
     }
     else return std::nullopt;
     return sys_days(day) + hours(*hour_value) + minutes(*minute_value) + seconds(*second_value) -
-        minutes(offset_minutes);
+        minutes(offset_minutes) + milliseconds(fraction_ms);
 }
 
 std::optional<Credential> read_credential(const fs::path& profile)
@@ -269,10 +278,23 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     const auto& type = member(period, "type");
     const auto& start_text = member(period, "start");
     const auto& end_text = member(period, "end");
-    if (!type.is_string() || type.as_string() != k_weekly_period) return status(Quota_status::UNAVAILABLE);
-    if (!end_text.is_string()) return status(Quota_status::UNAVAILABLE);
-    const auto end = timestamp(end_text.as_string());
-    if (!end || std::chrono::system_clock::now() >= *end) return status(Quota_status::UNAVAILABLE);
+    if (!start_text.is_string() || !end_text.is_string()) {
+        return status(Quota_status::UNAVAILABLE);
+    }
+    const auto start = timestamp(start_text.as_string(), true);
+    const auto end   = timestamp(end_text.as_string(), true);
+    const auto now   = std::chrono::system_clock::now();
+    if (!start || !end || *start >= *end || now < *start || now >= *end) {
+        return status(Quota_status::UNAVAILABLE);
+    }
+    // Grok's UsagePeriod supplies the real RFC3339 boundaries for weekly and
+    // monthly plans. quota@2 has whole minutes and a millisecond reset; never
+    // round a calendar month or an unrepresentable interval to a nominal size.
+    const auto duration       = *end - *start;
+    const auto window_minutes = std::chrono::duration_cast<std::chrono::minutes>(duration);
+    if (window_minutes.count() <= 0 || duration != window_minutes) {
+        return status(Quota_status::UNAVAILABLE);
+    }
     // quota@2 carries the native percentage, so usage past the allowance stays
     // above 100 and a negative value is preserved rather than saturated.
     std::optional<double> percent;
@@ -280,6 +302,9 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
         percent = reported_percent->as_number();
     }
     else {
+        if (!type.is_string() || type.as_string() != k_weekly_period) {
+            return status(Quota_status::UNAVAILABLE);
+        }
         // The billing service writes proto3 JSON, which omits zero-valued
         // fields (Grok's own client documents this for its Cent type), and
         // Grok's pager shows an omitted percentage with no monthly limit as
@@ -290,14 +315,10 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
         // on unified billing inside its current weekly period. Without the
         // tier the attempt could not decide.
         if (!settings) return status(Quota_status::FAILED);
-        // A period without a readable start never qualifies.
-        const auto start = (start_text.is_string() ? timestamp(start_text.as_string()) : std::nullopt)
-            .value_or(std::chrono::sys_seconds::max());
         const auto& unified = member(config, "isUnifiedBillingUser");
         if (tier && paid_supergrok(*tier) && no_monthly_cap(config) &&
-            unified.is_boolean() && unified.as_boolean() && start < *end &&
-            *end - start >= std::chrono::days(6) && *end - start <= std::chrono::days(8) &&
-            std::chrono::system_clock::now() >= start)
+            unified.is_boolean() && unified.as_boolean() &&
+            duration >= std::chrono::days(6) && duration <= std::chrono::days(8))
         {
             percent = 0.0;
         }
@@ -316,7 +337,7 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     auto result = status(Quota_status::READY);
     addon::Quota_window window;
     window.used_percent   = *percent;
-    window.window_minutes = k_week_minutes;
+    window.window_minutes = static_cast<std::uint64_t>(window_minutes.count());
     window.resets_at_ms   = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(end->time_since_epoch()).count());
     result.observation->primary = std::move(window);
