@@ -3,7 +3,11 @@
 #include "grok_launcher.h"
 
 #include <logonomic_cli_addon/accounts.h>
+#include <logonomic_cli_addon/json.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/probe_contracts.h>
+#include <logonomic_cli_addon/quota.h>
+#include <logonomic_cli_addon/session_contracts.h>
 
 #include <iostream>
 #include <optional>
@@ -11,6 +15,8 @@
 #include <chrono>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace addon = logonomic::cli_addon;
@@ -96,71 +102,6 @@ void exercise()
     check(grok::inspect_auth(request).observation->state == addon::Auth_status::NOT_LOGGED_IN, "native negative status recognized");
     request.inspection.timed_out = true;
     check(grok::inspect_auth(request).observation->state == addon::Auth_status::UNAVAILABLE, "timeout never means logged out");
-
-    request = {};
-    request.inspection.protocol_state = "await_initialize";
-    request.inspection.stdout_bytes = R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"id":"cached_token"},{"id":"grok.com"}]}})" "\n";
-    const auto authentication = grok::inspect_quota(request);
-    check(!authentication.complete && authentication.protocol_state == "await_authenticate" &&
-        authentication.stdin_bytes && authentication.stdin_bytes->find(
-            R"("method":"authenticate","params":{"methodId":"cached_token"})") != std::string::npos,
-        "quota authenticates only with Grok's cached non-interactive login");
-    request.inspection.protocol_state = authentication.protocol_state;
-    request.inspection.stdout_bytes += R"({"id":2,"result":{}})" "\n";
-    const auto billing = grok::inspect_quota(request);
-    check(!billing.complete && billing.protocol_state == "await_quota" && billing.stdin_bytes &&
-        billing.stdin_bytes->find(R"("id":3,"method":"_x.ai/billing")") != std::string::npos,
-        "quota is queried only after cached-token authentication succeeds");
-    request.inspection.protocol_state = billing.protocol_state;
-    request.inspection.stdout_bytes += R"({"id":3,"result":{"config":{"creditUsagePercent":63.5,"monthlyLimit":{"val":10000},"used":{"val":9000},"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-09-20T12:00:00Z"},"prepaidBalance":{"val":1234}},"subscription_tier":"SuperGrok"}})" "\n";
-    const auto quota = grok::inspect_quota(request);
-    check(quota.complete && quota.observation->state == addon::Quota_status::READY &&
-        quota.observation->primary->used_percent == 63.5 &&
-        quota.observation->primary->label == "Weekly" &&
-        quota.observation->primary->reset_text == "2026-09-20T12:00:00Z" &&
-        !quota.observation->secondary && !quota.observation->credits_balance && !quota.observation->plan,
-        "quota reports its usage window without exposing credit or plan details");
-    addon::Contract_failure failure;
-    check(addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(quota, 2), request.inspection.final, &failure, 2).has_value(),
-        "native quota observation satisfies the host contract");
-    for (const double percent : {-7.5, 125.0}) {
-        request.inspection.stdout_bytes = "{\"id\":3,\"result\":{\"config\":{\"creditUsagePercent\":" +
-            std::to_string(percent) + "}}}\n";
-        const auto observation = grok::inspect_quota(request);
-        check(observation.observation->primary->used_percent == percent &&
-            addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(observation, 2), request.inspection.final, &failure, 2).has_value(),
-            "quota-scan preserves every finite signed percentage without saturation");
-    }
-    request.inspection.stdout_bytes = R"({"id":3,"result":{"config":{"monthlyLimit":{"val":10000},"used":{"val":15000},"onDemandCap":{"val":2000},"onDemandUsed":{"val":3000},"prepaidBalance":{"val":-125}}}})" "\n";
-    const auto overage = grok::inspect_quota(request);
-    check(overage.observation->state == addon::Quota_status::UNAVAILABLE && !overage.observation->primary &&
-        !overage.observation->secondary && !overage.observation->credits_balance && !overage.observation->plan &&
-        addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(overage, 2), request.inspection.final, &failure, 2).has_value(),
-        "financial totals alone do not masquerade as provider quota");
-    request.inspection.stdout_bytes = R"({"id":3,"result":{"config":{"onDemandCap":{"val":0}},"subscription_tier":"SuperGrok Lite"}})" "\n";
-    const auto unmetered = grok::inspect_quota(request);
-    check(unmetered.complete && unmetered.observation->state == addon::Quota_status::UNAVAILABLE &&
-        addon::decode_quota_inspect_result(addon::encode_quota_inspect_result(unmetered, 2), request.inspection.final, &failure, 2).has_value(),
-        "a plan whose billing reply meters nothing reports quota unavailable, not ready without values");
-    request.inspection.stdout_bytes = R"({"id":3,"error":{"code":-32603,"message":"secret diagnostic"}})" "\n";
-    const auto failed = grok::inspect_quota(request);
-    check(failed.complete && failed.observation->state == addon::Quota_status::FAILED,
-        "upstream failure is explicit and raw diagnostics are not propagated");
-
-    request = {};
-    request.inspection.protocol_state = "await_initialize";
-    request.inspection.stdout_bytes = R"({"id":1,"result":{"protocolVersion":1,"authMethods":[{"id":"grok.com"}]}})" "\n";
-    const auto no_cached_login = grok::inspect_quota(request);
-    check(no_cached_login.complete && no_cached_login.observation->state == addon::Quota_status::NOT_LOGGED_IN &&
-        !no_cached_login.stdin_bytes,
-        "quota does not open an interactive login when no cached token is available");
-
-    request.inspection.protocol_state = "await_authenticate";
-    request.inspection.stdout_bytes += R"({"id":2,"error":{"code":-32000,"message":"authentication unavailable"}})" "\n";
-    const auto authentication_failed = grok::inspect_quota(request);
-    check(authentication_failed.complete && authentication_failed.observation->state == addon::Quota_status::NOT_LOGGED_IN &&
-        !authentication_failed.stdin_bytes,
-        "failed cached authentication does not query quota");
 }
 class Context final : public addon::Invocation_context
 {
@@ -169,14 +110,113 @@ public:
     addon::Json_value output;
     bool succeeded = false;
     bool done = false;
+    addon::Result_status failed_status = addon::Result_status::FAILED;
+    std::string failed_reason;
     const addon::Invoke_request& request() const override { return input; }
     bool cancel_requested() const override { return false; }
     bool wait_for_cancel(int) override { return false; }
     void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
     void succeed(addon::Json_value value) override { succeeded = true; done = true; output = std::move(value); }
-    void fail(addon::Result_status, std::string, std::string) override { done = true; }
+    void fail(addon::Result_status status, std::string reason, std::string) override
+    {
+        done = true;
+        failed_status = status;
+        failed_reason = std::move(reason);
+    }
     bool finished() const override { return done; }
 };
+void quota_is_read_by_the_packaged_helper()
+{
+#if defined(_WIN32)
+    const std::string platform = "windows-x86_64";
+    const std::string profile  = "C:/Users/Jane Doe/.grok-work";
+    const std::string helper   = "helpers/grok_quota_bridge.exe";
+#else
+    const std::string platform = "linux-x86_64";
+    const std::string profile  = "/home/jane/.grok-work";
+    const std::string helper   = "helpers/grok_quota_bridge";
+#endif
+    addon::Probe_prepare_request prepare;
+    prepare.context.launcher.script_body = "grok";
+    prepare.context.launcher.runner_key  = addon::k_runner_direct;
+    prepare.context.launcher_argv        = {"grok"};
+    prepare.context.working_directory    = std::filesystem::path(profile).parent_path().generic_string();
+    prepare.context.account_context      = addon::Account_context{};
+    prepare.context.account_context->version             = 2;
+    prepare.context.account_context->adapter_account_key = grok::profile_account_key(profile);
+    prepare.context.account_context->profile_path        = profile;
+    prepare.context.launch_environment = addon::Launch_environment{};
+    prepare.context.launch_environment->platform_id = platform;
+    prepare.context.launch_environment->effective_environment = addon::Json_value::object();
+    prepare.context.launch_environment->effective_environment.set("GROK_HOME", addon::Json_value(profile));
+    const auto prepare_quota = [&](Context& context) {
+        context.input.capability.capability_id = "quota";
+        context.input.operation = addon::k_prepare_operation;
+        context.input.payload = addon::encode_probe_prepare_request(prepare, 2);
+        grok::handle_probes(context);
+    };
+    Context prepared;
+    prepare_quota(prepared);
+    addon::Contract_failure failure;
+    const auto proposal = addon::decode_structured_prepare_result(prepared.output, &failure, 2);
+    check(prepared.succeeded && proposal && proposal->process.executable == addon::Process_executable(helper) &&
+        proposal->process.argv.empty() && proposal->inspection.protocol_state == "await_bridge" &&
+        proposal->process.environment == std::vector<std::pair<std::string, std::string>>{{"GROK_HOME", profile}},
+        "quota runs the packaged helper with the selected profile and nothing else");
+    check(addon::validate_structured_process_proposal(proposal->process, &failure),
+        "the host admits the helper proposal");
+
+    prepare.context.launch_environment->effective_environment.set(
+        "GROK_CLI_CHAT_PROXY_BASE_URL", addon::Json_value("https://proxy.example.com/v1"));
+    Context rerouted;
+    prepare_quota(rerouted);
+    check(!rerouted.succeeded && rerouted.done && rerouted.failed_status == addon::Result_status::UNAVAILABLE &&
+        rerouted.failed_reason == "quota_route_overridden",
+        "a launcher that routes Grok elsewhere has no quota the helper can read");
+
+    addon::Probe_inspect_request request;
+    request.account_context = prepare.context.account_context;
+    request.inspection.protocol_state = "await_bridge";
+    request.inspection.final = true;
+    request.inspection.exit_code = 0;
+    addon::Quota_inspect_result result;
+    result.complete = true;
+    result.observation = addon::Quota_observation{};
+    result.observation->state = addon::Quota_status::READY;
+    result.observation->primary = addon::Quota_window{};
+    result.observation->primary->used_percent   = 125.0;
+    result.observation->primary->window_minutes = 7 * 24 * 60;
+    result.observation->primary->resets_at_ms   = 1'790'000'000'000;
+    result.observation->plan = "SuperGrok";
+    const auto inspect = [&](const std::string& output) {
+        request.inspection.stdout_bytes = output;
+        Context context;
+        context.input.capability.capability_id = "quota";
+        context.input.operation = addon::k_inspect_operation;
+        context.input.payload = addon::encode_probe_inspect_request(request, 2);
+        grok::handle_probes(context);
+        check(context.succeeded, "the adapter completes every helper outcome as an observation");
+        addon::Contract_failure inspect_failure;
+        const auto decoded = addon::decode_quota_inspect_result(context.output, true, &inspect_failure, 2);
+        check(decoded && decoded->complete && decoded->observation &&
+            decoded->observation->scope.source_account_key == prepare.context.account_context->adapter_account_key &&
+            decoded->observation->scope.observed_at_ms > 0 && decoded->observation->scope.fresh_for_ms == 0,
+            "the adapter stamps the selected account and the observation time");
+        return *decoded->observation;
+    };
+    const auto ready = inspect(addon::serialize_json(addon::encode_quota_inspect_result(result, 2)) + '\n');
+    check(ready.state == addon::Quota_status::READY && ready.primary && ready.primary->used_percent == 125.0 &&
+        ready.primary->window_minutes == result.observation->primary->window_minutes &&
+        ready.primary->resets_at_ms == result.observation->primary->resets_at_ms && ready.plan == "SuperGrok",
+        "the helper's figures reach the host unchanged");
+    check(inspect("").state == addon::Quota_status::FAILED, "a helper that wrote no result failed the attempt");
+    request.inspection.exit_code = 1;
+    check(inspect(addon::serialize_json(addon::encode_quota_inspect_result(result, 2))).state ==
+        addon::Quota_status::FAILED, "a helper that exited with an error failed the attempt");
+    request.inspection.exit_code = 0;
+    request.inspection.timed_out = true;
+    check(inspect("").state == addon::Quota_status::FAILED, "a helper that timed out failed the attempt");
+}
 void accounts_are_named_after_their_profile_folders()
 {
     // Oracle: accounts@1 names an account with a filesystem profile after that
@@ -223,6 +263,6 @@ void accounts_are_named_after_their_profile_folders()
 } // namespace
 int main()
 {
-    try { exercise(); accounts_are_named_after_their_profile_folders(); return 0; }
+    try { exercise(); quota_is_read_by_the_packaged_helper(); accounts_are_named_after_their_profile_folders(); return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

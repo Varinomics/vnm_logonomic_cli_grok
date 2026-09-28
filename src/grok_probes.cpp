@@ -1,12 +1,14 @@
 #include "grok_probes.h"
 #include "grok_accounts.h"
+#include "grok_billing.h"
 #include "grok_launcher.h"
 
-#include <algorithm>
+#include <logonomic_cli_addon/quota.h>
+
 #include <chrono>
-#include <cmath>
 #include <cctype>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -14,13 +16,6 @@ namespace grok {
 namespace {
 
 namespace addon = logonomic::cli_addon;
-
-const addon::Json_value& member(const addon::Json_value& object, std::string_view name)
-{
-    static const addon::Json_value missing;
-    const auto* value = object.find(name);
-    return value ? *value : missing;
-}
 
 std::string_view trimmed(std::string_view value)
 {
@@ -36,23 +31,6 @@ addon::Observation_scope scope(const addon::Probe_inspect_request& request)
     result.observed_at_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
     return result;
-}
-
-std::optional<addon::Json_value> response_for_id(std::string_view output, int id)
-{
-    while (!output.empty()) {
-        const auto end = output.find('\n');
-        const auto line = trimmed(output.substr(0, end));
-        const auto value = addon::parse_json(line, {}, nullptr);
-        if (value && value->is_object()) {
-            const auto& identifier = member(*value, "id");
-            if ((identifier.is_number() && identifier.as_number() == id) ||
-                (identifier.is_string() && identifier.as_string() == std::to_string(id))) return value;
-        }
-        if (end == std::string_view::npos) break;
-        output.remove_prefix(end + 1);
-    }
-    return std::nullopt;
 }
 
 void assign_environment(std::vector<std::pair<std::string, std::string>>* environment,
@@ -91,85 +69,6 @@ addon::Auth_inspect_result inspect_auth(const addon::Probe_inspect_request& requ
     return result;
 }
 
-addon::Quota_inspect_result inspect_quota(const addon::Probe_inspect_request& request)
-{
-    addon::Quota_inspect_result result;
-    const auto observe_status = [&](addon::Quota_status status) {
-        result.complete = true;
-        addon::Quota_observation observation;
-        observation.scope = scope(request);
-        observation.state = status;
-        result.observation = std::move(observation);
-        return result;
-    };
-    const auto fail = [&] {
-        return observe_status(addon::Quota_status::FAILED);
-    };
-    const auto& protocol_state = request.inspection.protocol_state;
-    if (protocol_state == "await_quota") {
-        if (const auto response = response_for_id(request.inspection.stdout_bytes, 3)) {
-            if (response->find("error")) return fail();
-            const auto& config = member(member(*response, "result"), "config");
-            if (!config.is_object()) return fail();
-            const auto& percent = member(config, "creditUsagePercent");
-            std::optional<double> usage;
-            if (!percent.is_null()) {
-                if (!percent.is_number() || !std::isfinite(percent.as_number())) return fail();
-                usage = percent.as_number();
-            }
-
-            addon::Quota_observation observation;
-            observation.scope = scope(request);
-            observation.state = usage ? addon::Quota_status::READY : addon::Quota_status::UNAVAILABLE;
-            if (usage) {
-                addon::Quota_window window;
-                window.used_percent = *usage;
-                const auto& period = member(config, "currentPeriod");
-                const auto& type = member(period, "type");
-                if (type.is_string()) {
-                    if (type.as_string() == "USAGE_PERIOD_TYPE_WEEKLY") window.label = "Weekly";
-                    if (type.as_string() == "USAGE_PERIOD_TYPE_MONTHLY") window.label = "Monthly";
-                }
-                const auto& end = member(period, "end").is_string() ? member(period, "end") : member(config, "billingPeriodEnd");
-                if (end.is_string()) window.reset_text = end.as_string();
-                observation.primary = window;
-            }
-            result.complete = true;
-            result.observation = std::move(observation);
-            return result;
-        }
-    }
-    else
-    if (protocol_state == "await_authenticate") {
-        if (const auto response = response_for_id(request.inspection.stdout_bytes, 2)) {
-            if (response->find("error")) return observe_status(addon::Quota_status::NOT_LOGGED_IN);
-            result.protocol_state = "await_quota";
-            result.stdin_bytes = R"({"jsonrpc":"2.0","id":3,"method":"_x.ai/billing","params":{}})" "\n";
-            return result;
-        }
-    }
-    else
-    if (protocol_state == "await_initialize") {
-        if (const auto response = response_for_id(request.inspection.stdout_bytes, 1)) {
-            if (response->find("error") || !member(*response, "result").is_object()) return fail();
-            const auto& methods = member(member(*response, "result"), "authMethods");
-            if (!methods.is_array()) return observe_status(addon::Quota_status::NOT_LOGGED_IN);
-            const auto cached_token_available = std::any_of(methods.as_array().begin(), methods.as_array().end(),
-                [](const addon::Json_value& method) {
-                    const auto& identifier = member(method, "id");
-                    return identifier.is_string() && identifier.as_string() == "cached_token";
-                });
-            if (!cached_token_available) return observe_status(addon::Quota_status::NOT_LOGGED_IN);
-            result.protocol_state = "await_authenticate";
-            result.stdin_bytes = R"({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"cached_token"}})" "\n";
-            return result;
-        }
-    }
-    if (request.inspection.final) return fail();
-    result.protocol_state = protocol_state;
-    return result;
-}
-
 void handle_probes(addon::Invocation_context& context)
 {
     if (context.cancel_requested()) { context.fail(addon::Result_status::CANCELLED, "cancelled"); return; }
@@ -180,33 +79,46 @@ void handle_probes(addon::Invocation_context& context)
         if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code); return; }
         const auto native_home = launch_profile_home(request->context, context);
         if (!native_home) return;
-        const auto command = recognize_launcher(request->context.launcher.script_body);
-        if (!command) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_unrecognized"); return; }
         const auto& environment = *request->context.launch_environment;
-        const auto argv = resolve_probe_launcher(*command, quota ? std::vector<std::string>{"agent", "--no-leader", "stdio"} :
-            std::vector<std::string>{"models"}, environment.effective_environment, request->context.working_directory);
-        if (!argv) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable"); return; }
         addon::Structured_prepare_result result;
+        if (quota) {
+            const bool windows = environment.platform_id.starts_with("windows-");
+            for (const auto& item : environment.effective_environment.as_object()) {
+                if (is_quota_route_override(item.name, windows)) {
+                    context.fail(addon::Result_status::UNAVAILABLE, "quota_route_overridden");
+                    return;
+                }
+            }
+            const auto selected = selected_profile(request->context, context);
+            if (!selected) return;
 #if defined(_WIN32)
-        result.process.executable = "helpers/grok_launch_bridge.exe";
+            result.process.executable = "helpers/grok_quota_bridge.exe";
 #else
-        result.process.executable = "helpers/grok_launch_bridge";
+            result.process.executable = "helpers/grok_quota_bridge";
 #endif
-        result.process.argv = *argv;
-        const bool windows = environment.platform_id.starts_with("windows-");
-        for (const auto& item : environment.effective_environment.as_object()) {
-            assign_environment(&result.process.environment, item.name, item.value.as_string(), windows);
+            assign_environment(&result.process.environment, "GROK_HOME", selected->profile_path, windows);
         }
-        assign_environment(&result.process.environment, "GROK_HOME", *native_home, windows);
+        else {
+            const auto command = recognize_launcher(request->context.launcher.script_body);
+            if (!command) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_unrecognized"); return; }
+            const auto argv = resolve_probe_launcher(*command, {"models"},
+                environment.effective_environment, request->context.working_directory);
+            if (!argv) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable"); return; }
+#if defined(_WIN32)
+            result.process.executable = "helpers/grok_launch_bridge.exe";
+#else
+            result.process.executable = "helpers/grok_launch_bridge";
+#endif
+            result.process.argv = *argv;
+            const bool windows = environment.platform_id.starts_with("windows-");
+            for (const auto& item : environment.effective_environment.as_object()) {
+                assign_environment(&result.process.environment, item.name, item.value.as_string(), windows);
+            }
+            assign_environment(&result.process.environment, "GROK_HOME", *native_home, windows);
+        }
         result.profile_storage = request->context.profile_storage;
         result.account_context = request->context.account_context;
-        result.inspection.protocol_state = quota ? "await_initialize" : "await_exit";
-        if (quota) {
-            result.inspection.incremental = true;
-            result.inspection.keep_stdin_open = true;
-            result.process.stdin_behavior = addon::Stdin_behavior::PAYLOAD;
-            result.process.stdin_payload = R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"logonomic","version":"1"}}})" "\n";
-        }
+        result.inspection.protocol_state = quota ? "await_bridge" : "await_exit";
         context.succeed(addon::encode_structured_prepare_result(result, 2));
         return;
     }
@@ -214,8 +126,23 @@ void handle_probes(addon::Invocation_context& context)
     const auto request = addon::decode_probe_inspect_request(context.request().payload, &failure, 2);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code); return; }
     if (!quota) { context.succeed(addon::encode_auth_inspect_result(inspect_auth(*request))); return; }
-    auto result = inspect_quota(*request);
-    context.succeed(addon::encode_quota_inspect_result(result, 2));
+    if (request->inspection.protocol_state != "await_bridge" || !request->inspection.final) {
+        context.fail(addon::Result_status::FAILED, "invalid_quota_bridge_state");
+        return;
+    }
+    // A helper that timed out, failed or wrote no result is a failed
+    // observation; the host adds its own timeout diagnostic.
+    const auto wire = addon::parse_json(trimmed(request->inspection.stdout_bytes), {}, nullptr);
+    auto decoded = wire && !request->inspection.timed_out && request->inspection.exit_code == 0
+        ? addon::decode_quota_inspect_result(*wire, true, &failure, 2) : std::nullopt;
+    if (!decoded || !decoded->complete || !decoded->observation) {
+        decoded = addon::Quota_inspect_result{};
+        decoded->complete = true;
+        decoded->observation = addon::Quota_observation{};
+        decoded->observation->state = addon::Quota_status::FAILED;
+    }
+    decoded->observation->scope = scope(*request);
+    context.succeed(addon::encode_quota_inspect_result(*decoded, 2));
 }
 
 } // namespace grok

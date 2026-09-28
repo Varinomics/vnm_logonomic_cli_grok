@@ -6,8 +6,15 @@ add-on SDK. Windows and Linux x86-64 artifacts are built separately.
 The provider preserves the selected `GROK_HOME` profile. Account discovery uses
 Grok's platform home convention and empty-override behavior. Authentication
 inspection reads the native `grok models` status banner after successful process
-completion. Quota inspection uses Grok's read-only ACP billing extension;
-credentials and model configuration remain owned by Grok.
+completion. Quota inspection reads the selected profile's current public xAI
+OIDC credential and calls Grok's fixed HTTPS billing and settings endpoints.
+The bearer stays in the short-lived helper's memory and request headers; the
+package does not refresh or write Grok credentials. Custom auth, team, and
+proxy routes are unavailable for this quota probe. The weekly window reports
+Grok's own percentage, which may exceed 100, and its reset time. While the
+selected profile's credential is expired, each quota refresh fails until Grok
+itself refreshes the credential. On Linux the helper uses libcurl, so building
+the package needs its development files.
 
 Native file hooks report session and turn starts through authenticated SDK
 helper ingress. Successful turn completion and subagent completion are not

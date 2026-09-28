@@ -71,6 +71,18 @@ add_executable(grok_helper src/grok_helper.cpp)
 grok_target(grok_helper)
 logonomic_cli_addon_add_launch_bridge(grok_launch_bridge)
 grok_target(grok_launch_bridge)
+add_executable(grok_quota_bridge
+    src/grok_billing.cpp
+    src/grok_billing_http.cpp
+    src/grok_quota_bridge.cpp)
+target_link_libraries(grok_quota_bridge PRIVATE grok_provider)
+grok_target(grok_quota_bridge)
+if(WIN32)
+    target_link_libraries(grok_quota_bridge PRIVATE winhttp)
+else()
+    find_package(CURL REQUIRED)
+    target_link_libraries(grok_quota_bridge PRIVATE CURL::libcurl)
+endif()
 
 logonomic_cli_addon_package_platform(GROK_PLATFORM)
 set(GROK_EXECUTABLE_SUFFIX "${CMAKE_EXECUTABLE_SUFFIX}")
@@ -100,12 +112,13 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_adapter>" "${GROK_PACKAGE_DIRECTORY}/adapter/grok_adapter${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_helper>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_helper${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_launch_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_launch_bridge${GROK_EXECUTABLE_SUFFIX}"
+    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_quota_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_quota_bridge${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "$<TARGET_FILE:logonomic_cli_addon_index>" "${GROK_PACKAGE_DIRECTORY}"
         --third-party "assets/grok.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
         --third-party "assets/grok-dark.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
-    DEPENDS grok_adapter grok_helper grok_launch_bridge logonomic_cli_addon_index
+    DEPENDS grok_adapter grok_helper grok_launch_bridge grok_quota_bridge logonomic_cli_addon_index
         "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
     VERBATIM)
 add_custom_target(grok_package ALL DEPENDS "${GROK_PACKAGE_DIRECTORY}/package.files.json")
@@ -124,6 +137,18 @@ foreach(test_name IN ITEMS grok_runtime_tests grok_acp_tests grok_probe_tests gr
     add_test(NAME ${test_name} COMMAND ${test_name})
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
 endforeach()
+# The billing tests build the helper's own sources against a scripted HTTPS
+# transport; the packaged helper itself runs in grok_quota_bridge_tests.
+add_executable(grok_billing_tests tests/grok_billing_tests.cpp src/grok_billing.cpp)
+target_link_libraries(grok_billing_tests PRIVATE grok_provider)
+grok_target(grok_billing_tests)
+add_test(NAME grok_billing_tests COMMAND grok_billing_tests)
+set_tests_properties(grok_billing_tests PROPERTIES TIMEOUT 120)
+add_test(NAME grok_quota_bridge_tests COMMAND "${CMAKE_COMMAND}"
+    "-DBRIDGE=$<TARGET_FILE:grok_quota_bridge>"
+    "-DWORK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/quota-bridge-fixture"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/grok_quota_bridge_tests.cmake")
+set_tests_properties(grok_quota_bridge_tests PROPERTIES TIMEOUT 120)
 add_executable(grok_lifecycle_tests tests/grok_lifecycle_tests.cpp)
 target_link_libraries(grok_lifecycle_tests PRIVATE grok_provider)
 grok_target(grok_lifecycle_tests)
