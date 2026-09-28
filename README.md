@@ -37,10 +37,20 @@ Structured implementation and delegated tasks use the native ACP stdio agent.
 Delegation supplies the host's task-control MCP servers, verifies their native
 session catalog reports ready and exposes every required action, then submits the
 prompt. Native end-turn and an acknowledged session close are required for a
-result. Native permission requests report `hook_approval_required`; the package
-does not change the selected permission policy. Model and reasoning-effort
-launcher options are preserved; other root-interface options are explicitly
-unavailable for ACP task preparation. Model selection has no version ceiling.
+result. Model selection has no version ceiling.
+
+A structured or delegated task keeps the launcher's permission posture. The
+launcher's `--model`, `--reasoning-effort` and `--always-approve` options carry
+over to `grok agent`; the interactive CLI's other options, among them
+`--permission-mode`, `--allow` and `--deny`, have no agent-mode equivalent and
+are refused with `delegated_launcher_options_unavailable`, naming the option. When
+Grok asks for a tool's permission, the package answers with the request's own
+`allow-once` option only for the task's own Task tools
+(`logonomic-<task>-<server>__<action>`) and with `reject-once` for anything else,
+which nobody can approve in a headless run; it never chooses `always-allow`.
+Grok ends a turn at a rejected tool, and the task fails with
+`tool_permission_denied`. A task that edits files or runs commands therefore
+needs a launcher that approves them, such as one passing `--always-approve`.
 
 Usage reads `sessions/<cwd>/<session>/usage.json` with its `summary.json`.
 Persisted turns already contain deltas, including folded subagent spend. The

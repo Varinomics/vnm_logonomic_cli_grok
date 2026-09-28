@@ -24,6 +24,41 @@ bool response(const Json& value, int id)
     return text(value, "jsonrpc") == "2.0" && member(value, "id").is_integer() &&
         member(value, "id").as_integer() == id && member(value, "result").is_object() && !value.find("error");
 }
+// A request whose `toolCall` invokes one of the task's own Task tools: Grok
+// asks with rawInput {variant: "UseTool", tool_name: "<server>__<action>"}
+// and the same title.
+bool task_tool_request(const Json& tool_call, const Json& expected)
+{
+    const auto& input = member(tool_call, "rawInput");
+    const auto name   = text(input, "tool_name");
+    if (text(input, "variant") != "UseTool" || name.empty() || text(tool_call, "title") != name) return false;
+    for (const auto& server : expected.as_array()) {
+        for (const auto& action : member(server, "actions").as_array()) {
+            if (name == text(server, "name") + "__" + action.as_string()) return true;
+        }
+    }
+    return false;
+}
+// The reply to a native permission request: its allow-once option for the
+// task's own Task tools, its reject-once option for anything else, which the
+// launcher's posture has not approved and nobody can approve headlessly.
+// Empty when the request is not one Grok writes.
+std::string permission_reply(const Json& request, const Json& state, bool* rejected)
+{
+    const auto& params  = member(request, "params");
+    const auto& options = member(params, "options");
+    if (text(params, "sessionId") != text(state, "session") || !member(params, "toolCall").is_object() ||
+        !options.is_array()) return {};
+    const bool allowed = task_tool_request(member(params, "toolCall"), member(state, "servers"));
+    const char* option = allowed ? "allow-once" : "reject-once";
+    if (!std::any_of(options.as_array().begin(), options.as_array().end(), [&](const auto& offered) {
+            return text(offered, "optionId") == option &&
+                text(offered, "kind") == (allowed ? "allow_once" : "reject_once");
+        })) return {};
+    *rejected = !allowed;
+    return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", member(request, "id")},
+        {"result", object({{"outcome", object({{"outcome", Json("selected")}, {"optionId", Json(option)}})}})}})) + '\n';
+}
 bool admitted_servers(const Json& result, const Json& expected)
 {
     const auto& servers = member(result, "servers");
@@ -79,15 +114,15 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
         {"prompt", Json(request.prompt)}, {"session", Json("")}, {"output", Json("")},
         {"new", object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}})},
         {"servers", std::move(expected)}, {"catalog_dirty", Json(false)},
-        {"catalog_admitted", Json(false)}, {"catalog_id", Json(3)}}));
+        {"catalog_admitted", Json(false)}, {"catalog_id", Json(3)}, {"rejected", Json(false)}}));
 }
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     auto state = parse(inspection.protocol_state);
     if (!state || !exact_keys(*state, {"stage", "pending", "prompt", "session", "output", "new", "servers",
-            "catalog_dirty", "catalog_admitted", "catalog_id"}) ||
+            "catalog_dirty", "catalog_admitted", "catalog_id", "rejected"}) ||
         !member(*state, "stage").is_integer() || !member(*state, "catalog_dirty").is_boolean() || !member(*state, "servers").is_array() ||
-        !member(*state, "new").is_object()) return failure("malformed_acp_state");
+        !member(*state, "new").is_object() || !member(*state, "rejected").is_boolean()) return failure("malformed_acp_state");
     for (const auto key : {"pending", "prompt", "session", "output"})
         if (!member(*state, key).is_string()) return failure("malformed_acp_state");
     if (!member(*state, "catalog_admitted").is_boolean() ||
@@ -112,8 +147,13 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (!value || text(*value, "jsonrpc") != "2.0") return failure("invalid_acp_record");
         if (value->find("method")) {
             if (value->find("id")) {
-                return failure(text(*value, "method") == "session/request_permission"
-                    ? "hook_approval_required" : "unsupported_acp_client_request");
+                if (text(*value, "method") != "session/request_permission") return failure("unsupported_acp_client_request");
+                bool rejected = false;
+                const auto reply = stage == 4 ? permission_reply(*value, *state, &rejected) : std::string{};
+                if (reply.empty()) return failure("acp_permission_request_unsupported");
+                if (rejected) state->set("rejected", Json(true));
+                input += reply;
+                continue;
             }
             const auto method = text(*value, "method");
             if (method == "session/update") {
@@ -155,15 +195,23 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         }
         else
         if (stage == 3) {
-            if (!member(result, "servers").is_array()) {
+            // Grok nests the catalog: {"result": {"servers": [...], "sessionMcpResolved": ...}}.
+            const auto& catalog = member(result, "result");
+            if (!member(catalog, "servers").is_array()) {
                 return failure("invalid_mcp_catalog");
             }
             // Consume the reply before processing further frames. Admission waits
             // for trailing invalidations, including an incomplete trailing frame.
-            state->set("catalog_admitted", Json(admitted_servers(result, member(*state, "servers"))));
+            state->set("catalog_admitted", Json(admitted_servers(catalog, member(*state, "servers"))));
             stage = 6;
         }
         else if (stage == 4) {
+            // Grok cancels the turn when a tool's permission is rejected.
+            if (text(result, "stopReason") == "cancelled" && member(*state, "rejected") == Json(true) &&
+                text(member(result, "_meta"), "cancellationCategory") == "PermissionRejected")
+            {
+                return failure("tool_permission_denied");
+            }
             if (text(result, "stopReason") != "end_turn" || output.empty()) return failure("acp_completion_failed");
             input = rpc(5, "session/close", object({{"sessionId", member(*state, "session")}}));
             stage = 5;

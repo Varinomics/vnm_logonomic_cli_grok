@@ -81,8 +81,18 @@ void prepare_delegated(addon::Invocation_context& context)
     std::vector<std::string> arguments{"agent", "--no-leader"};
     for (std::size_t i = 0; i < command->prefix_arguments.size(); ++i) {
         const auto& option = command->prefix_arguments[i];
+        // The launcher's own approval posture carries over; grok agent has no
+        // equivalent of the interactive permission mode or rule options.
+        if (option == "--always-approve") {
+            arguments.push_back(option);
+            continue;
+        }
         if (option != "--model" && option != "-m" && option != "--reasoning-effort" && option != "--effort") {
-            context.fail(addon::Result_status::UNAVAILABLE, "delegated_launcher_options_unavailable"); return;
+            context.fail(addon::Result_status::UNAVAILABLE, "delegated_launcher_options_unavailable",
+                "Grok runs a delegated task in its agent mode, which takes only --model, --reasoning-effort and "
+                "--always-approve from a launcher; the launcher's " + option.substr(0, option.find('=')) +
+                " has no agent-mode equivalent.");
+            return;
         }
         if (++i == command->prefix_arguments.size()) {
             context.fail(addon::Result_status::FAILED, "invalid_launcher_option"); return;

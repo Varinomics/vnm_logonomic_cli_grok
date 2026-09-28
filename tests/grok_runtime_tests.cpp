@@ -34,12 +34,18 @@ public:
     addon::Json_value output;
     bool succeeded = false;
     bool done = false;
+    std::string detail;
     const addon::Invoke_request& request() const override { return input; }
     bool cancel_requested() const override { return false; }
     bool wait_for_cancel(int) override { return false; }
     void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
     void succeed(addon::Json_value value) override { succeeded = true; done = true; output = std::move(value); }
-    void fail(addon::Result_status, std::string reason, std::string) override { done = true; output = addon::Json_value(std::move(reason)); }
+    void fail(addon::Result_status, std::string reason, std::string text) override
+    {
+        done = true;
+        output = addon::Json_value(std::move(reason));
+        detail = std::move(text);
+    }
     bool finished() const override { return done; }
 };
 int main(int argc, char** argv)
@@ -218,6 +224,42 @@ int main(int argc, char** argv)
                     refused.input.payload = addon::encode_delegated_prepare_request(request, 2);
                     grok::handle_preparation(refused);
                     require(!refused.succeeded, "missing connection must refuse delegation");
+
+                    // Oracle: the owner's rule that a delegated run keeps its
+                    // launcher's permission posture (2026-09-28), and
+                    // `grok agent --help` (1.0.41): agent mode takes
+                    // --always-approve but no permission mode or rule option.
+                    auto posture = request;
+                    posture.control.connection = addon::Delegated_connection{
+                        (root / "host relay").string(), (root / ".logonomic/task-servers.json").string()};
+                    const auto prepare_with = [&](const std::string& options) {
+                        posture.context.launcher.script_body = launch.launcher.script_body + options;
+                        posture.context.launcher_argv = launch.launcher_argv;
+                        posture.context.launcher_argv.back() = posture.context.launcher.script_body;
+                        Context prepared_posture;
+                        prepared_posture.input = task.input;
+                        prepared_posture.input.payload = addon::encode_delegated_prepare_request(posture, 2);
+                        grok::handle_preparation(prepared_posture);
+                        return prepared_posture;
+                    };
+                    const auto approving = prepare_with(" --always-approve");
+                    const auto approving_result = addon::decode_delegated_prepare_result(approving.output, &failure, 2);
+                    require(approving.succeeded && approving_result, "a launcher's --always-approve is prepared");
+                    const auto& agent_argv = approving_result->process.argv;
+                    const auto approve = std::find(agent_argv.begin(), agent_argv.end(), "--always-approve");
+                    require(approve != agent_argv.end() &&
+                        std::find(approve, agent_argv.end(), "stdio") != agent_argv.end(),
+                        "the launcher's --always-approve reaches grok agent");
+                    const auto plain_argv = addon::decode_delegated_prepare_result(task.output, &failure, 2)->process.argv;
+                    require(std::find(plain_argv.begin(), plain_argv.end(), "--always-approve") == plain_argv.end(),
+                        "a launcher without it gets no approval the package added");
+                    for (const std::string option : {"--permission-mode acceptEdits", "--allow Bash", "--deny Read"}) {
+                        const auto refusing = prepare_with(" " + option);
+                        require(!refusing.succeeded &&
+                            refusing.output == addon::Json_value("delegated_launcher_options_unavailable") &&
+                            refusing.detail.find(option.substr(0, option.find(' '))) != std::string::npos,
+                            "a permission option grok agent cannot carry is refused, naming it");
+                    }
                 }
                 const auto process = addon::decode_process_proposal(*task.output.find("process"), &failure);
                 require(process && addon::validate_structured_process_proposal(*process, &failure) &&

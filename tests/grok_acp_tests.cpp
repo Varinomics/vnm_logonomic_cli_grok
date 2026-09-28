@@ -9,6 +9,13 @@ std::string reply(int id, Json result)
 {
     return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", Json(id)}, {"result", std::move(result)}})) + '\n';
 }
+// Oracle: grok 1.0.41 answers `_x.ai/mcp/list` with its catalog nested one
+// level down, as recorded by the scripted delegation gate
+// (`{"result":{"servers":[...],"sessionMcpResolved":false}}`).
+Json catalog(Json servers)
+{
+    return object({{"result", object({{"servers", std::move(servers)}, {"sessionMcpResolved", Json(false)}})}});
+}
 namespace {
 int require_catalog_refresh(const addon::Structured_inspect_result& result)
 {
@@ -38,7 +45,7 @@ void catalog_ordering(const std::string& catalog_state, const Json& servers, con
 {
     // The native MCP catalog is invalidated by each of these notifications.
     // A prompt requires a clean session snapshot with its required actions.
-    const auto ready = object({{"servers", servers}});
+    const auto ready = catalog(servers);
     for (const auto& rejection : {
             object({{"enabled", Json(false)}}),
             object({{"status", Json("connecting")}}),
@@ -56,7 +63,7 @@ void catalog_ordering(const std::string& catalog_state, const Json& servers, con
         unavailable.push_back(std::move(server));
         addon::Structured_inspection inspection;
         inspection.protocol_state = catalog_state;
-        inspection.stdout_bytes = reply(3, object({{"servers", std::move(unavailable)}}));
+        inspection.stdout_bytes = reply(3, catalog(std::move(unavailable)));
         const auto waiting = inspect_acp(inspection);
         require(!waiting.complete && !waiting.failure_reason && !waiting.stdin_bytes,
             "catalog admission ignored native server readiness or required actions");
@@ -114,7 +121,7 @@ void catalog_ordering(const std::string& catalog_state, const Json& servers, con
             require_catalog_refresh(inspect_acp(inspection));
         }
         inspection.protocol_state = catalog_state;
-        inspection.stdout_bytes = reply(3, object({{"servers", Json::array()}}));
+        inspection.stdout_bytes = reply(3, catalog(Json::array()));
         const auto waiting = inspect_acp(inspection);
         require(!waiting.complete && !waiting.failure_reason && !waiting.stdin_bytes,
             "incomplete startup catalog released the prompt");
@@ -196,14 +203,86 @@ int main()
             {"session", object({{"enabled", Json(true)}, {"status", Json("ready")}, {"tools", std::move(tools)}})}}));
         catalog_ordering(catalog_state, servers, request.prompt);
         inspection.protocol_state = catalog_state;
-        inspection.stdout_bytes = reply(3, object({{"servers", servers}}));
+        inspection.stdout_bytes = reply(3, catalog(servers));
         result = inspect_acp(inspection);
         require(result.stdin_bytes && result.stdin_bytes->find("session/prompt") != std::string::npos, "admitted control did not release prompt");
         const auto prompt_state = result.protocol_state;
+        // Oracle: the owner's rule that a delegated run keeps its launcher's
+        // posture and the package approves only its own Task tools
+        // (2026-09-28), and grok 1.0.41's permission request as recorded by the
+        // scripted gate and a probe: a Task tool call arrives as rawInput
+        // {variant: UseTool, tool_name: <server>__<action>} with that title and
+        // options allow-once, always-allow and reject-once; after reject-once
+        // Grok ends the prompt with stopReason cancelled and cancellation
+        // category PermissionRejected.
+        const auto permission_request = [](const std::string& tool, const std::string& title, bool allow_once) {
+            auto options = Json::array();
+            options.push_back(object({{"optionId", Json("always-allow")}, {"name", Json("always allow")}, {"kind", Json("allow_always")}}));
+            if (allow_once) {
+                options.push_back(object({{"optionId", Json("allow-once")}, {"name", Json("allow once")}, {"kind", Json("allow_once")}}));
+            }
+            options.push_back(object({{"optionId", Json("reject-once")}, {"name", Json("reject once")}, {"kind", Json("reject_once")}}));
+            auto input = object({{"variant", Json("UseTool")}, {"tool_name", Json(tool)}, {"tool_input", Json::object()}});
+            auto call = object({{"toolCallId", Json("call_7d5edeb1")}, {"kind", Json("other")}, {"title", Json(title)},
+                {"rawInput", std::move(input)}});
+            return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", Json(0)},
+                {"method", Json("session/request_permission")},
+                {"params", object({{"sessionId", Json("root-session")}, {"toolCall", std::move(call)},
+                    {"options", std::move(options)}})}})) + '\n';
+        };
+        const auto chosen = [](const addon::Structured_inspect_result& answered) {
+            require(!answered.complete && !answered.failure_reason && answered.stdin_bytes.has_value(),
+                "a permission request was not answered");
+            const auto reply = parse(*answered.stdin_bytes);
+            require(reply && member(*reply, "id") == Json(0) &&
+                text(member(member(*reply, "result"), "outcome"), "outcome") == "selected",
+                "the answer names the request and selects one of its options");
+            return text(member(member(*reply, "result"), "outcome"), "optionId");
+        };
+        const std::string task_tool = "logonomic-task-1-control__complete";
         inspection.protocol_state = prompt_state;
-        inspection.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"session/request_permission\",\"params\":{}}\n";
-        const auto permission = inspect_acp(inspection);
-        require(permission.failure_reason == std::optional<std::string>("hook_approval_required"), "permission was silently approved");
+        inspection.stdout_bytes = permission_request(task_tool, task_tool, true);
+        const auto approved = inspect_acp(inspection);
+        require(chosen(approved) == "allow-once", "the task's own Task tool is approved once, never always");
+        for (const auto& [tool, title] : {std::pair<std::string, std::string>{"github__create_issue", "github__create_issue"},
+                {"logonomic-task-1-control__other", "logonomic-task-1-control__other"},
+                {"logonomic-task-2-control__complete", "logonomic-task-2-control__complete"},
+                {task_tool, "run_terminal_command"}})
+        {
+            inspection.protocol_state = prompt_state;
+            inspection.stdout_bytes = permission_request(tool, title, true);
+            const auto answered = inspect_acp(inspection);
+            require(chosen(answered) == "reject-once", "anything but the task's own Task tools is left to the launcher");
+            inspection.protocol_state = answered.protocol_state;
+            inspection.stdout_bytes = reply(4, object({{"stopReason", Json("cancelled")},
+                {"_meta", object({{"cancellationCategory", Json("PermissionRejected")}})}}));
+            require(inspect_acp(inspection).failure_reason == std::optional<std::string>("tool_permission_denied"),
+                "a turn Grok ended at a rejected tool fails as that denial");
+            inspection.stdout_bytes = reply(4, object({{"stopReason", Json("cancelled")},
+                {"_meta", object({{"cancellationCategory", Json("UserCancelled")}})}}));
+            require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_completion_failed"),
+                "a cancellation for another cause after a rejection is not a permission denial");
+        }
+        inspection.protocol_state = prompt_state;
+        inspection.stdout_bytes = reply(4, object({{"stopReason", Json("cancelled")},
+            {"_meta", object({{"cancellationCategory", Json("PermissionRejected")}})}}));
+        require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_completion_failed"),
+            "a cancellation the package did not cause is not a permission denial");
+        inspection.protocol_state = prompt_state;
+        inspection.stdout_bytes = permission_request(task_tool, task_tool, false);
+        require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_permission_request_unsupported"),
+            "a request without a one-time approval is not answered with a lasting one");
+        inspection.protocol_state = catalog_state;
+        inspection.stdout_bytes = permission_request(task_tool, task_tool, true);
+        require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_permission_request_unsupported"),
+            "no permission is answered before the prompt");
+        inspection.protocol_state = approved.protocol_state;
+        inspection.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"root-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Submitted.\"}}}}\n" +
+            reply(4, object({{"stopReason", Json("end_turn")}}));
+        const auto after_approval = inspect_acp(inspection);
+        require(!after_approval.complete && after_approval.stdin_bytes &&
+            after_approval.stdin_bytes->find("session/close") != std::string::npos,
+            "a turn that used its approved Task tool completes as before");
         inspection.protocol_state = prompt_state;
         inspection.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"wrong-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"fake\"}}}}\n";
         require(inspect_acp(inspection).failure_reason.has_value(), "foreign session text accepted");
@@ -218,7 +297,7 @@ int main()
         result = inspect_acp(inspection);
         require(result.complete && result.result_bytes == std::optional<std::string>("Done."), "confirmed completion lost");
         inspection.protocol_state = catalog_state;
-        inspection.stdout_bytes = reply(3, object({{"servers", Json::array()}}));
+        inspection.stdout_bytes = reply(3, catalog(Json::array()));
         result = inspect_acp(inspection);
         require(!result.complete && !result.stdin_bytes, "asynchronous MCP startup prompted or failed prematurely");
         inspection.protocol_state = result.protocol_state;
