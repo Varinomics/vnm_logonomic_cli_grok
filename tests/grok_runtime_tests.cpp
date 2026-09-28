@@ -190,6 +190,8 @@ int main(int argc, char** argv)
                         {"LOGONOMIC_VNMCTL_PATH", fake.string()},
                     };
                     request.control.servers.push_back(server);
+                    request.control.connection = addon::Delegated_connection{
+                        (root / "host relay").string(), (root / ".logonomic/task-servers.json").string()};
                     task.input.payload = addon::encode_delegated_prepare_request(request, 2);
                 }
                 else {
@@ -202,6 +204,21 @@ int main(int argc, char** argv)
                 grok::handle_preparation(task);
                 require(task.succeeded && addon::validate_session_exchange_payload(task.output, &failure),
                     "session producer duplicated inherited and frozen assignments");
+                if (delegated) {
+                    const auto delegated_result = addon::decode_delegated_prepare_result(task.output, &failure, 2);
+                    require(delegated_result &&
+                        delegated_result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
+                        addon::validate_delegated_acknowledgment(request.control, delegated_result->acknowledgment, &failure),
+                        "delegation must acknowledge the configured host connection");
+                    require(delegated_result->inspection.protocol_state.find(std::string(64, 'c')) == std::string::npos,
+                        "host credentials cannot enter delegated continuation");
+                    request.control.connection.reset();
+                    Context refused;
+                    refused.input = task.input;
+                    refused.input.payload = addon::encode_delegated_prepare_request(request, 2);
+                    grok::handle_preparation(refused);
+                    require(!refused.succeeded, "missing connection must refuse delegation");
+                }
                 const auto process = addon::decode_process_proposal(*task.output.find("process"), &failure);
                 require(process && addon::validate_structured_process_proposal(*process, &failure) &&
                     process->environment == assigned->set, "session lost explicit frozen environment");

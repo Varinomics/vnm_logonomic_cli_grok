@@ -65,6 +65,10 @@ void prepare_delegated(addon::Invocation_context& context)
     }
     else request = addon::decode_delegated_prepare_request(context.request().payload, &failure, 2);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
+    if (!structured && !request->control.connection) {
+        context.fail(addon::Result_status::UNAVAILABLE, "task_server_connection_unavailable");
+        return;
+    }
     if (request->purpose != addon::Structured_purpose::IMPLEMENTATION) {
         context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable"); return;
     }
@@ -112,6 +116,9 @@ void prepare_delegated(addon::Invocation_context& context)
     result.inspection.incremental = true;
     result.inspection.keep_stdin_open = true;
     result.inspection.protocol_state = acp_initial_state(*request);
+    if (!structured) {
+        result.acknowledgment.connection_version = addon::k_delegated_connection_version;
+    }
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
     for (const auto& server : request->control.servers) result.acknowledgment.server_ids.push_back(server.server_id);

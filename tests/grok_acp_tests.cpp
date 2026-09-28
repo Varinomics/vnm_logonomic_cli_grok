@@ -159,6 +159,7 @@ int main()
         request.prompt = "Make the requested change.";
         request.context.working_directory = "/workspace";
         request.control.task_id = "task-1";
+        request.control.connection = addon::Delegated_connection{"/host relay", "/task/.logonomic/task-servers.json"};
         request.control.servers.push_back({"control", "/task-control", {"complete"}, {{"BOUND_CONTEXT", "opaque"}}});
         addon::Structured_inspection inspection;
         inspection.protocol_state = acp_initial_state(request);
@@ -172,14 +173,17 @@ int main()
         require(emitted_servers.is_array() && emitted_servers.as_array().size() == 1,
             "forward exactly the required task server");
         const auto& emitted_server = emitted_servers.as_array().front();
-        require(text(emitted_server, "command") == "/task-control" &&
-            member(emitted_server, "args").is_array() && member(emitted_server, "args").as_array().empty(),
-            "host task server is an exact entrypoint, not a vnmctl command prefix");
+        const auto& args = member(emitted_server, "args").as_array();
+        require(text(emitted_server, "command") == request.control.connection->relay_program &&
+            args.size() == 4 && args[0].as_string() == "--descriptor" &&
+            args[1].as_string() == request.control.connection->descriptor_path &&
+            args[2].as_string() == "--server" && args[3].as_string() == "control",
+            "native MCP request preserves exact nonsecret relay arguments");
         const auto& emitted_env = member(emitted_server, "env");
-        require(emitted_env.is_array() && emitted_env.as_array().size() == 1 &&
-            text(emitted_env.as_array().front(), "name") == "BOUND_CONTEXT" &&
-            text(emitted_env.as_array().front(), "value") == "opaque",
-            "preserve exact host-granted server environment");
+        require(emitted_env.is_array() && emitted_env.as_array().empty() &&
+            result.stdin_bytes->find("opaque") == std::string::npos &&
+            result.protocol_state.find("opaque") == std::string::npos,
+            "host authority cannot enter ACP requests or continuation");
         inspection.protocol_state = result.protocol_state;
         inspection.stdout_bytes = reply(2, object({{"sessionId", Json("root-session")}}));
         result = inspect_acp(inspection);

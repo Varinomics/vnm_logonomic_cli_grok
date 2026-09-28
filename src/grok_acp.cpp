@@ -62,12 +62,15 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
     auto expected = Json::array();
     for (const auto& server : request.control.servers) {
         const auto name = "logonomic-" + request.control.task_id + "-" + server.server_id;
-        auto environment = Json::array();
-        for (const auto& [key, value] : server.environment)
-            environment.push_back(object({{"name", Json(key)}, {"value", Json(value)}}));
+        const auto& connection = request.control.connection.value();
         auto args = Json::array();
-        servers.push_back(object({{"name", Json(name)}, {"command", Json(server.program)},
-            {"args", std::move(args)}, {"env", std::move(environment)}}));
+        for (const auto& argument : {std::string("--descriptor"), connection.descriptor_path,
+                 std::string("--server"), server.server_id})
+        {
+            args.push_back(Json(argument));
+        }
+        servers.push_back(object({{"name", Json(name)}, {"command", Json(connection.relay_program)},
+            {"args", std::move(args)}, {"env", Json::array()}}));
         auto actions = Json::array();
         for (const auto& action : server.actions) actions.push_back(Json(action));
         expected.push_back(object({{"name", Json(name)}, {"actions", std::move(actions)}}));
