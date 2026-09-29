@@ -12,10 +12,12 @@ The bearer stays in the short-lived helper's memory and request headers; the
 package does not refresh or write Grok credentials. Custom auth, team, and
 proxy routes are unavailable for this quota probe. The usage window reports
 Grok's own percentage, which may exceed 100, its actual period length and its
-reset time. Monthly periods retain their actual number of days; periods that
-cannot be expressed exactly in whole minutes with a millisecond reset are
-unavailable. While the
-selected profile's credential is expired, each quota refresh fails until Grok
+reset time. Monthly periods retain their actual number of days. Fractional
+period boundaries retain their precision when measuring the window; the reset
+is rounded down to the SDK's millisecond precision. Malformed or stale periods,
+and durations that cannot be expressed exactly in whole minutes, fail the
+refresh instead of reporting absent quotas. While the selected profile's
+credential is expired, each quota refresh fails until Grok
 itself refreshes the credential. On Linux the helper uses libcurl, so building
 the package needs its development files.
 

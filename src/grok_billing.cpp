@@ -96,9 +96,10 @@ bool custom_auth_or_route(const fs::path& profile)
 }
 
 std::optional<std::chrono::sys_time<std::chrono::milliseconds>> timestamp(
-    std::string_view text, bool exact_milliseconds = false)
+    std::string_view text, std::string* submillisecond_fraction = nullptr)
 {
     using namespace std::chrono;
+    if (submillisecond_fraction) submillisecond_fraction->clear();
     if (text.size() < 20 || text.size() > 40 || text[4] != '-' || text[7] != '-' ||
         text[10] != 'T' || text[13] != ':' || text[16] != ':') return std::nullopt;
     const auto digits = [&](std::size_t offset, std::size_t count) -> std::optional<int> {
@@ -124,14 +125,19 @@ std::optional<std::chrono::sys_time<std::chrono::milliseconds>> timestamp(
         int place = 100;
         while (position < text.size() && text[position] >= '0' && text[position] <= '9') {
             const int digit = text[position] - '0';
-            if (exact_milliseconds && place == 0 && digit != 0) {
-                return std::nullopt;
+            if (place == 0 && submillisecond_fraction) {
+                submillisecond_fraction->push_back(text[position]);
             }
             fraction_ms += digit * place;
             place /= 10;
             ++position;
         }
         if (position == fraction_start) return std::nullopt;
+    }
+    if (submillisecond_fraction) {
+        while (!submillisecond_fraction->empty() && submillisecond_fraction->back() == '0') {
+            submillisecond_fraction->pop_back();
+        }
     }
     int offset_minutes = 0;
     if (position + 1 == text.size() && text[position] == 'Z') {}
@@ -257,7 +263,8 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
         credential->bearer, credential->user_id, version));
     if (!billing) return status(Quota_status::FAILED);
     const auto& config = member(*billing, "config");
-    if (!config.is_object()) return status(Quota_status::UNAVAILABLE);
+    if (config.is_null()) return status(Quota_status::UNAVAILABLE);
+    if (!config.is_object()) return status(Quota_status::FAILED);
     // Grok's client reads an explicit null percentage as an omitted one.
     const auto* reported_percent = config.find("creditUsagePercent");
     if (reported_percent && reported_percent->is_null()) reported_percent = nullptr;
@@ -274,26 +281,28 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     }
 
     const auto& period = member(config, "currentPeriod");
-    if (!period.is_object()) return status(Quota_status::UNAVAILABLE);
+    if (!period.is_object()) return status(Quota_status::FAILED);
     const auto& type = member(period, "type");
     const auto& start_text = member(period, "start");
     const auto& end_text = member(period, "end");
     if (!start_text.is_string() || !end_text.is_string()) {
-        return status(Quota_status::UNAVAILABLE);
+        return status(Quota_status::FAILED);
     }
-    const auto start = timestamp(start_text.as_string(), true);
-    const auto end   = timestamp(end_text.as_string(), true);
+    std::string start_fraction;
+    std::string end_fraction;
+    const auto start = timestamp(start_text.as_string(), &start_fraction);
+    const auto end   = timestamp(end_text.as_string(), &end_fraction);
     const auto now   = std::chrono::system_clock::now();
     if (!start || !end || *start >= *end || now < *start || now >= *end) {
-        return status(Quota_status::UNAVAILABLE);
+        return status(Quota_status::FAILED);
     }
-    // Grok's UsagePeriod supplies the real RFC3339 boundaries for weekly and
-    // monthly plans. quota@2 has whole minutes and a millisecond reset; never
-    // round a calendar month or an unrepresentable interval to a nominal size.
+    // Equal submillisecond fractions cancel when measuring a period. Keep
+    // them through validation so flooring the SDK reset never rounds an
+    // unrepresentable duration into a whole-minute window.
     const auto duration       = *end - *start;
     const auto window_minutes = std::chrono::duration_cast<std::chrono::minutes>(duration);
-    if (window_minutes.count() <= 0 || duration != window_minutes) {
-        return status(Quota_status::UNAVAILABLE);
+    if (window_minutes.count() <= 0 || duration != window_minutes || start_fraction != end_fraction) {
+        return status(Quota_status::FAILED);
     }
     // quota@2 carries the native percentage, so usage past the allowance stays
     // above 100 and a negative value is preserved rather than saturated.

@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-// No recorded Grok billing reply exists. The fixtures follow the response
+// Fixtures follow the observed fractional weekly period and the response
 // shapes documented by Grok's own open-source client (github.com/xai-org/
 // grok-build): the credits config of crates/codegen/xai-grok-shell/src/
 // extensions/billing.rs (its billing_config_deserializes_credits_config_shape
@@ -292,9 +292,19 @@ void response_interpretation()
 
     g_service.billing = ok(R"({"config":null})");
     check(state_of(fetch(profile)) == Quota_status::UNAVAILABLE, "a reply without a credits config meters nothing");
+    g_service.billing = ok("{}");
+    check(state_of(fetch(profile)) == Quota_status::UNAVAILABLE, "an absent credits config meters nothing");
+    for (const auto malformed : {R"({"config":"invalid"})", R"({"config":{}})",
+             R"({"config":{"currentPeriod":"invalid"}})"})
+    {
+        g_service.billing = ok(malformed);
+        const auto failed = fetch(profile);
+        check(state_of(failed) == Quota_status::FAILED && decodes_as_quota_2(failed),
+            "an uninterpretable credits period fails instead of reporting absent quotas");
+    }
     const Period ended{week.start - std::chrono::days(14), week.start - std::chrono::days(7)};
     g_service.billing = ok(credits_config(ended, "42.5"));
-    check(state_of(fetch(profile)) == Quota_status::UNAVAILABLE, "a period that has ended is not reported");
+    check(state_of(fetch(profile)) == Quota_status::FAILED, "a stale billing period fails the refresh");
 
     g_service.billing = ok(credits_config(week, "42.5"));
     g_service.while_billing = [&] {
@@ -304,6 +314,41 @@ void response_interpretation()
     check(state_of(fetch(profile)) == Quota_status::FAILED,
         "figures fetched with a credential Grok replaced meanwhile are not reported");
     g_service.while_billing = nullptr;
+}
+
+void native_fractional_weekly_period()
+{
+    Profile profile;
+    write_file(profile.path() / "auth.json", auth_json(Clock::now() + std::chrono::hours(1)));
+    const auto week = current_week();
+    // The observed SuperGrok Lite reply carries .193919 at both weekly
+    // boundaries. Move the dates with the test clock, preserving its precision.
+    auto billing = credits_config(week, "");
+    for (const auto boundary : {week.start, week.end}) {
+        const auto position = billing.find(rfc3339(boundary));
+        billing.replace(position, rfc3339(boundary).size(), rfc3339(boundary, ".193919"));
+    }
+    g_service.billing = ok(billing);
+    g_service.settings = settings_tier("SuperGrok Lite");
+    const auto result = fetch(profile);
+    check(state_of(result) == Quota_status::READY && result.observation->primary,
+        "the observed microsecond-precision weekly period supplies a quota");
+    check(result.observation->primary->used_percent == 0.0 &&
+        result.observation->primary->window_minutes == std::uint64_t{7 * 24 * 60} &&
+        result.observation->primary->resets_at_ms == epoch_ms(week.end) + 193 &&
+        result.observation->plan == "SuperGrok Lite" && decodes_as_quota_2(result),
+        "the weekly quota keeps its duration and percentage and floors its reset to SDK milliseconds");
+    const auto end_position = billing.find(rfc3339(week.end, ".193919"));
+    billing.replace(end_position, rfc3339(week.end, ".193919").size(), rfc3339(week.end, ".193919000"));
+    g_service.billing = ok(billing);
+    check(state_of(fetch(profile)) == Quota_status::READY,
+        "equivalent fractional precision preserves the exact weekly duration");
+    const auto changed_position = billing.find(rfc3339(week.end, ".193919000"));
+    billing.replace(changed_position, rfc3339(week.end, ".193919000").size(), rfc3339(week.end, ".193918"));
+    g_service.billing = ok(billing);
+    const auto unequal = fetch(profile);
+    check(state_of(unequal) == Quota_status::FAILED && decodes_as_quota_2(unequal),
+        "different submillisecond fractions do not become a whole-minute period after rounding");
 }
 
 void non_weekly_periods()
@@ -367,7 +412,7 @@ void non_weekly_periods()
             Period{start, month.end + std::chrono::seconds(1)}})
     {
         g_service.billing = ok(credits_config(invalid, "42.5"));
-        if (state_of(fetch(profile)) != Quota_status::UNAVAILABLE) {
+        if (state_of(fetch(profile)) != Quota_status::FAILED) {
             std::cerr << "invalid or fractional-minute period fixture failed\n";
             ++failures;
         }
@@ -376,7 +421,7 @@ void non_weekly_periods()
     const auto end_position = submillisecond.find(rfc3339(month.end));
     submillisecond.replace(end_position, rfc3339(month.end).size(), rfc3339(month.end, ".0001"));
     g_service.billing = ok(submillisecond);
-    if (state_of(fetch(profile)) != Quota_status::UNAVAILABLE) {
+    if (state_of(fetch(profile)) != Quota_status::FAILED) {
         std::cerr << "submillisecond reset fixture failed\n";
         ++failures;
     }
@@ -421,6 +466,7 @@ int main()
     try {
         credential_parsing();
         response_interpretation();
+        native_fractional_weekly_period();
         non_weekly_periods();
         return 0;
     }
