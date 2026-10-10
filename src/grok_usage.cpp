@@ -5,6 +5,7 @@
 
 #include <logonomic_cli_addon/sha256.h>
 #include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/capability_ids.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -109,10 +110,15 @@ public:
     }
     void reserve(const Disk_usage& usage)
     {
-        require(usage.bytes <= m_limits.disk_bytes - std::min(m_usage.bytes, m_limits.disk_bytes) &&
+        require(try_reserve(usage), "usage_disk_budget_exceeded");
+    }
+    bool try_reserve(const Disk_usage& usage)
+    {
+        if (!(usage.bytes <= m_limits.disk_bytes - std::min(m_usage.bytes, m_limits.disk_bytes) &&
             usage.entries <= m_limits.filesystem_entries - std::min(m_usage.entries, m_limits.filesystem_entries) &&
-            usage.lines <= m_limits.persisted_lines - std::min(m_usage.lines, m_limits.persisted_lines), "usage_disk_budget_exceeded");
+            usage.lines <= m_limits.persisted_lines - std::min(m_usage.lines, m_limits.persisted_lines))) return false;
         m_usage.bytes += usage.bytes; m_usage.entries += usage.entries; m_usage.lines += usage.lines;
+        return true;
     }
     void release(const Disk_usage& usage)
     {
@@ -757,6 +763,609 @@ void sorted_snapshot(const fs::path& work, bool* incomplete, const std::function
     else { Budget_output empty(work / "records", std::ios::binary); require(static_cast<bool>(empty), "usage_storage_write_failed"); }
 }
 
+constexpr const char* k_temporal_file = "usage-temporal";
+constexpr const char* k_temporal_index = "usage-temporal-index";
+
+std::string accounting_digest(std::string_view line)
+{
+    const auto value = addon::parse_json(line, {}, nullptr);
+    require(value.has_value(), "usage_cache_invalid");
+    return addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(*value)));
+}
+
+struct Temporal_row
+{
+    std::string id;
+    std::uint64_t total = 0;
+    std::string cache_digest;
+    std::string accounting_digest;
+    std::optional<std::string> instant;
+    std::string reason = "missing-evidence";
+};
+
+addon::Json_value encode_temporal_row(const Temporal_row& row)
+{
+    auto value = addon::Json_value::object();
+    value.set("record_id", addon::Json_value(row.id));
+    value.set("total_tokens", addon::Json_value(row.total));
+    value.set("cache_accounting_sha256_hex", addon::Json_value(row.cache_digest));
+    value.set("accounting_sha256_hex", addon::Json_value(row.accounting_digest));
+    value.set("instant", row.instant ? addon::Json_value(*row.instant) : addon::Json_value{});
+    value.set("reason", addon::Json_value(row.reason));
+    return value;
+}
+
+Temporal_row decode_temporal_row(std::string_view line)
+{
+    const auto value = addon::parse_json(line, {}, nullptr);
+    require(value && value->is_object() && value->as_object().size() == 6, "usage_temporal_unavailable");
+    Temporal_row row;
+    row.id = string_member(*value, "record_id");
+    const auto& total = member(*value, "total_tokens");
+    require(total.is_integer() && total.as_integer() >= 0 && total.as_integer() <= 9007199254740991LL,
+        "usage_temporal_unavailable");
+    row.total = static_cast<std::uint64_t>(total.as_integer());
+    row.cache_digest = string_member(*value, "cache_accounting_sha256_hex");
+    row.accounting_digest = string_member(*value, "accounting_sha256_hex");
+    require(digest_name(row.cache_digest) && digest_name(row.accounting_digest), "usage_temporal_unavailable");
+    row.reason = string_member(*value, "reason");
+    const auto& instant = member(*value, "instant");
+    if (instant.is_string()) {
+        require(instant.as_string().size() <= addon::k_max_usage_temporal_bytes && row.reason == "complete",
+            "usage_temporal_unavailable");
+        addon::Usage_temporal proof;
+        proof.parent = {"native-proof", 1, "native-proof", std::nullopt};
+        proof.portions.push_back({"instant", instant.as_string(), {}, {}, 1});
+        require(addon::decode_usage_temporal(addon::encode_usage_temporal(proof), nullptr).has_value(),
+            "usage_temporal_unavailable");
+        row.instant = instant.as_string();
+    }
+    else {
+        require(instant.is_null() && (row.reason == "missing-evidence" || row.reason == "capacity" ||
+            row.reason == "unsupported" || (row.reason == "complete" && row.total == 0)), "usage_temporal_unavailable");
+    }
+    return row;
+}
+
+std::array<char, 16> temporal_index_entry(std::uint64_t record_offset, std::uint64_t proof_offset)
+{
+    std::array<char, 16> bytes{};
+    for (unsigned index = 0; index < 8; ++index) {
+        bytes[index] = static_cast<char>((record_offset >> (index * 8)) & 255);
+        bytes[index + 8] = static_cast<char>((proof_offset >> (index * 8)) & 255);
+    }
+    return bytes;
+}
+
+std::pair<std::uint64_t, std::uint64_t> decode_temporal_index(const std::array<char, 16>& bytes)
+{
+    std::pair<std::uint64_t, std::uint64_t> offsets{};
+    for (unsigned index = 0; index < 8; ++index) {
+        offsets.first |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[index])) << (index * 8);
+        offsets.second |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[index + 8])) << (index * 8);
+    }
+    return offsets;
+}
+
+std::uint64_t cache_manifest_bytes(const fs::path& root,
+    const std::optional<addon::Account_context>& account, const std::string& snapshot_id)
+{
+    addon::Usage_cache_manifest manifest{account, snapshot_id, "grok-turn-cache@1", {}};
+    std::uint64_t bytes = addon::serialize_json(addon::encode_usage_cache_manifest(manifest)).size();
+    std::uint64_t count = 0;
+    for (const auto& entry : fs::directory_iterator(root)) {
+        require(fs::is_regular_file(entry.symlink_status()), "usage_storage_invalid");
+        manifest.files = {{path_text(entry.path().filename()), fs::file_size(entry.path()), std::string(64, '0')}};
+        const auto encoded = addon::encode_usage_cache_manifest(manifest);
+        bytes += addon::serialize_json(member(encoded, "files").as_array().front()).size();
+        if (count++ != 0) ++bytes;
+    }
+    return bytes;
+}
+
+std::uint64_t temporal_manifest_bytes(const std::optional<addon::Account_context>& account,
+    const std::string& snapshot_id)
+{
+    addon::Usage_cache_manifest manifest{account, snapshot_id, "grok-turn-cache@1", {}};
+    std::uint64_t bytes = 0;
+    for (const auto* name : {k_temporal_file, k_temporal_index}) {
+        manifest.files = {{name, active_budget->limits().candidate_bytes, std::string(64, '0')}};
+        const auto encoded = addon::encode_usage_cache_manifest(manifest);
+        bytes += addon::serialize_json(member(encoded, "files").as_array().front()).size() + 1;
+    }
+    return bytes;
+}
+
+struct Native_times
+{
+    std::vector<std::pair<std::string, std::optional<std::string>>> rows;
+    bool matched = false;
+    bool capacity = false;
+};
+
+Native_times matching_native_times(const fs::path& cache_path,
+    const std::function<bool()>& cancelled)
+{
+    Native_times times;
+    std::ifstream cached;
+    const auto header = read_cache_header(cache_path, &cached);
+    if (member(header, "revision") != addon::Json_value(k_parser_revision)) return times;
+    const auto source = addon::path_from_utf8(string_member(header, "source"));
+    const auto before = fingerprint(source);
+    const auto summary_before = fingerprint(source.parent_path() / "summary.json");
+    if (!before || !summary_before || !fingerprint_matches(header, *before) ||
+        member(header, "summary_size") != addon::Json_value(std::to_string(summary_before->size)) ||
+        member(header, "summary_modified") != addon::Json_value(std::to_string(summary_before->modified.time_since_epoch().count())))
+    {
+        return times;
+    }
+    std::ifstream native(source, std::ios::binary);
+    if (!native) return times;
+    std::string error;
+    std::size_t bytes = 0;
+    std::string line;
+    const bool parsed = read_session_usage(native, source, [&](const Session_usage_record& record) {
+        if (!read_line(cached, &line) || accounting_digest(line) != accounting_digest(encode_record(record))) return false;
+        if (record.usage.total_tokens != 0 && !times.capacity) {
+            const auto size = record.usage.record_id.size() + record.instant.value_or("").size();
+            if (size > k_sort_bytes - std::min(bytes, k_sort_bytes)) {
+                times.rows.clear();
+                times.capacity = true;
+            }
+            else {
+                bytes += size;
+                times.rows.emplace_back(record.usage.record_id, record.instant);
+            }
+        }
+        return true;
+    }, cancelled, &error);
+    check_cancel(cancelled);
+    const auto after = fingerprint(source);
+    const auto summary_after = fingerprint(source.parent_path() / "summary.json");
+    times.matched = parsed && !read_line(cached, &line) && after && summary_after &&
+        *after == *before && *summary_after == *summary_before;
+    if (!times.matched) times.rows.clear();
+    std::sort(times.rows.begin(), times.rows.end(), [](const auto& a, const auto& b) { return id_less(a.first, b.first); });
+    return times;
+}
+
+bool valid_temporal_sidecar(const fs::path& root, const std::optional<addon::Account_context>& account,
+    const std::string& snapshot_id, const std::function<bool()>& cancelled)
+{
+    try {
+        if (!fs::is_regular_file(fs::symlink_status(root / k_temporal_file)) ||
+            !fs::is_regular_file(fs::symlink_status(root / k_temporal_index))) return false;
+        const auto records_bytes = fs::file_size(root / "records");
+        const auto proof_bytes = fs::file_size(root / k_temporal_file);
+        const auto index_bytes = fs::file_size(root / k_temporal_index);
+        const auto remaining = active_budget->limits().candidate_bytes -
+            std::min(records_bytes, active_budget->limits().candidate_bytes);
+        if (proof_bytes > remaining || index_bytes > remaining - proof_bytes || index_bytes % 16 != 0 ||
+            index_bytes / 16 > active_budget->limits().candidate_records) return false;
+        std::ifstream proof(root / k_temporal_file, std::ios::binary);
+        std::ifstream index(root / k_temporal_index, std::ios::binary);
+        std::ifstream records(root / "records", std::ios::binary);
+        if (!proof || !index || !records) return false;
+        std::string line;
+        if (!read_line(proof, &line)) return false;
+        const auto header = addon::parse_json(line, {}, nullptr);
+        if (!header || !header->is_object() || header->as_object().size() != 4 ||
+            member(*header, "version") != addon::Json_value(1) || member(*header, "account") != account_value(account) ||
+            member(*header, "snapshot_id") != addon::Json_value(snapshot_id) ||
+            member(*header, "accounting_ledger_sha256_hex") != addon::Json_value(file_digest(root / "records", cancelled)))
+        {
+            return false;
+        }
+        addon::Sha256 digest;
+        digest.update(line); digest.update("\n");
+        std::uint64_t count = 0, record_offset = 0, proof_offset = line.size() + 1;
+        while (read_line(proof, &line)) {
+            check_cancel(cancelled);
+            const auto value = addon::parse_json(line, {}, nullptr);
+            if (value && value->find("end")) {
+                return value->is_object() && value->as_object().size() == 3 &&
+                    member(*value, "end") == addon::Json_value(1) &&
+                    member(*value, "count") == addon::Json_value(count) &&
+                    member(*value, "sha256_hex") == addon::Json_value(addon::to_hex(digest.finish())) &&
+                    !read_line(records, &line) && !read_line(proof, &line) && index.peek() == std::char_traits<char>::eof();
+            }
+            const auto row = decode_temporal_row(line);
+            std::string accounting;
+            if (!read_line(records, &accounting)) return false;
+            const auto record = decode_record(accounting);
+            std::array<char, 16> offsets{};
+            if (!index.read(offsets.data(), offsets.size()) ||
+                decode_temporal_index(offsets) != std::make_pair(record_offset, proof_offset) ||
+                row.id != record.usage.record_id || row.total != record.usage.total_tokens ||
+                row.accounting_digest != accounting_digest(accounting)) return false;
+            ++count;
+            record_offset += accounting.size() + 1;
+            proof_offset += line.size() + 1;
+            digest.update(line); digest.update("\n");
+        }
+    }
+    catch (const Scan_failure& failure) { if (failure.reason == "cancelled") throw; }
+    catch (const std::exception&) { check_cancel(cancelled); }
+    return false;
+}
+
+class Temporal_budget final
+{
+public:
+    explicit Temporal_budget(const fs::path& root)
+    : m_remaining(active_budget->limits().candidate_bytes - fs::file_size(root / "records")) {}
+
+    void write(std::ofstream& output, std::string_view bytes)
+    {
+        require(bytes.size() <= m_remaining - std::min(m_bytes, m_remaining), "usage_temporal_capacity");
+        active_budget->reserve({bytes.size(), 0,
+            static_cast<std::uint64_t>(std::count(bytes.begin(), bytes.end(), '\n'))});
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        require(static_cast<bool>(output), "usage_storage_write_failed");
+        m_bytes += bytes.size();
+    }
+    void line(std::ofstream& output, std::string_view bytes)
+    {
+        write(output, bytes);
+        write(output, "\n");
+    }
+    void remove(const fs::path& path)
+    {
+        const auto bytes = fs::file_size(path);
+        require(bytes <= m_bytes, "usage_budget_accounting_invalid");
+        remove_owned_path(path);
+        m_bytes -= bytes;
+    }
+private:
+    std::uint64_t m_remaining = 0;
+    std::uint64_t m_bytes = 0;
+};
+
+bool copy_unknown_temporal(const fs::path& root,
+    const std::optional<addon::Usage_cache_reference>& accepted,
+    const std::optional<addon::Account_context>& account,
+    Temporal_budget& budget, const std::function<bool()>& cancelled)
+{
+    if (!accepted) return false;
+    const auto source = cache_io_path(addon::path_from_utf8(accepted->root));
+    if (!fs::is_regular_file(fs::symlink_status(source / k_temporal_file)) ||
+        !fs::is_regular_file(fs::symlink_status(source / k_temporal_index))) return false;
+    std::ifstream proof(source / k_temporal_file, std::ios::binary);
+    std::string line;
+    if (!proof || !read_line(proof, &line)) return false;
+    const auto header = addon::parse_json(line, {}, nullptr);
+    const auto* version = header ? header->find("version") : nullptr;
+    const auto* custody = header ? header->find("snapshot_id") : nullptr;
+    if (!header || !header->is_object() || !version || !version->is_integer() ||
+        version->as_integer() <= 0 || version->as_integer() == 1 || !custody ||
+        !custody->is_string() || custody->as_string().empty() ||
+        member(*header, "account") != account_value(account)) return false;
+    const auto ledger = file_digest(source / "records", cancelled);
+    if (member(*header, "accounting_ledger_sha256_hex") != addon::Json_value(ledger) ||
+        file_digest(root / "records", cancelled) != ledger ||
+        file_digest(root / "cache-inventory", cancelled) != file_digest(source / "cache-inventory", cancelled))
+    {
+        return false;
+    }
+    proof.close();
+    // The accepted SDK seal already authenticates these opaque bytes. Keep
+    // their original custody; neither future rows nor their index are decoded.
+    for (const auto* name : {k_temporal_file, k_temporal_index}) {
+        check_cancel(cancelled);
+        const auto original = source / name;
+        const auto destination = root / name;
+        std::ifstream input(original, std::ios::binary);
+        Budget_output output(destination, std::ios::binary | std::ios::trunc);
+        require(input && output, "usage_temporal_unavailable");
+        std::array<char, 65536> bytes{};
+        while (input.read(bytes.data(), bytes.size()) || input.gcount() > 0) {
+            check_cancel(cancelled);
+            budget.write(output, std::string_view(bytes.data(), static_cast<std::size_t>(input.gcount())));
+        }
+        require(!input.bad(), "usage_temporal_unavailable");
+        output.close(); input.close();
+        require(static_cast<bool>(output) &&
+            file_digest(destination, cancelled) == file_digest(original, cancelled), "usage_temporal_unavailable");
+        sync_file(destination);
+    }
+    return true;
+}
+
+fs::path temporal_run(const fs::path& root, std::uint64_t level, std::uint64_t index)
+{
+    return root / ("temporal-run-" + std::to_string(level) + "-" + std::to_string(index));
+}
+
+void merge_temporal_runs(const fs::path& left_path, const fs::path& right_path,
+    const fs::path& destination, Temporal_budget& budget, const std::function<bool()>& cancelled)
+{
+    std::ifstream left(left_path, std::ios::binary), right(right_path, std::ios::binary);
+    Budget_output output(destination, std::ios::binary | std::ios::trunc);
+    require(left && right && output, "usage_temporal_unavailable");
+    std::string a, b;
+    std::string a_id, b_id;
+    const auto next = [](std::ifstream& input, std::string& line, std::string& id) {
+        if (!read_line(input, &line)) return false;
+        id = decode_temporal_row(line).id;
+        return true;
+    };
+    bool have_a = next(left, a, a_id), have_b = next(right, b, b_id);
+    while (have_a || have_b) {
+        check_cancel(cancelled);
+        require(!have_a || !have_b || a_id != b_id, "usage_temporal_unavailable");
+        if (have_a && (!have_b || id_less(a_id, b_id))) {
+            budget.line(output, a);
+            have_a = next(left, a, a_id);
+        }
+        else {
+            budget.line(output, b);
+            have_b = next(right, b, b_id);
+        }
+    }
+    output.close(); left.close(); right.close();
+    require(static_cast<bool>(output), "usage_storage_write_failed");
+    budget.remove(left_path); budget.remove(right_path);
+}
+
+fs::path sorted_temporal_bindings(const fs::path& root, Temporal_budget& budget,
+    const std::function<bool()>& cancelled)
+{
+    std::vector<Temporal_row> chunk;
+    std::size_t bytes = 0;
+    std::uint64_t runs = 0;
+    const auto flush = [&] {
+        if (chunk.empty()) return;
+        std::sort(chunk.begin(), chunk.end(), [](const auto& a, const auto& b) { return id_less(a.id, b.id); });
+        Budget_output output(temporal_run(root, 0, runs++), std::ios::binary | std::ios::trunc);
+        require(static_cast<bool>(output), "usage_storage_write_failed");
+        for (const auto& row : chunk) budget.line(output, addon::serialize_json(encode_temporal_row(row)));
+        output.close();
+        require(static_cast<bool>(output), "usage_storage_write_failed");
+        chunk.clear(); bytes = 0;
+    };
+    for (const auto& entry : fs::directory_iterator(root)) {
+        check_cancel(cancelled);
+        const auto name = entry.path().filename().string();
+        if (!name.ends_with(".cache") || !digest_name(std::string_view(name).substr(0, name.size() - 6))) continue;
+        const auto native = matching_native_times(entry.path(), cancelled);
+        std::ifstream input;
+        read_cache_header(entry.path(), &input);
+        std::string line;
+        while (read_line(input, &line)) {
+            check_cancel(cancelled);
+            auto record = decode_record(line);
+            Temporal_row row;
+            row.id = record.usage.record_id;
+            row.total = record.usage.total_tokens;
+            row.cache_digest = accounting_digest(line);
+            refresh_repository(&record);
+            row.accounting_digest = accounting_digest(encode_record(record));
+            if (native.matched) {
+                if (row.total == 0) row.reason = "complete";
+                else if (native.capacity) row.reason = "capacity";
+                else {
+                    const auto found = std::lower_bound(native.rows.begin(), native.rows.end(), row.id,
+                        [](const auto& observation, const auto& id) { return id_less(observation.first, id); });
+                    require(found != native.rows.end() && found->first == row.id, "usage_temporal_unavailable");
+                    row.instant = found->second;
+                    row.reason = row.instant ? "complete" : "unsupported";
+                }
+            }
+            const auto size = addon::serialize_json(encode_temporal_row(row)).size();
+            if (!chunk.empty() && (chunk.size() >= k_sort_records || size > k_sort_bytes - std::min(bytes, k_sort_bytes))) flush();
+            bytes += size;
+            chunk.push_back(std::move(row));
+        }
+    }
+    flush();
+    std::uint64_t level = 0;
+    while (runs > 1) {
+        const auto next = (runs + 1) / 2;
+        for (std::uint64_t index = 0; index < next; ++index) {
+            check_cancel(cancelled);
+            const auto destination = temporal_run(root, level + 1, index);
+            if (index * 2 + 1 == runs) fs::rename(temporal_run(root, level, index * 2), destination);
+            else merge_temporal_runs(temporal_run(root, level, index * 2),
+                temporal_run(root, level, index * 2 + 1), destination, budget, cancelled);
+        }
+        ++level; runs = next;
+    }
+    if (runs == 0) {
+        Budget_output output(temporal_run(root, 0, 0), std::ios::binary);
+        require(static_cast<bool>(output), "usage_storage_write_failed");
+    }
+    return temporal_run(root, level, 0);
+}
+
+void write_temporal_sidecar(const fs::path& root, const fs::path& sorted,
+    const std::optional<addon::Usage_cache_reference>& accepted,
+    const std::optional<addon::Account_context>& account, const std::string& snapshot_id,
+    Temporal_budget& budget, const std::function<bool()>& cancelled)
+{
+    std::ifstream prior;
+    std::string prior_line;
+    std::optional<Temporal_row> prior_row;
+    const auto next_prior = [&] {
+        prior_row.reset();
+        if (prior && read_line(prior, &prior_line)) {
+            const auto value = addon::parse_json(prior_line, {}, nullptr);
+            if (value && value->find("end")) return;
+            prior_row = decode_temporal_row(prior_line);
+        }
+    };
+    if (accepted) {
+        const auto source = cache_io_path(addon::path_from_utf8(accepted->root));
+        if (valid_temporal_sidecar(source, account, accepted->snapshot_id, cancelled)) {
+            prior.open(source / k_temporal_file, std::ios::binary);
+            require(read_line(prior, &prior_line), "usage_temporal_unavailable");
+            next_prior();
+        }
+    }
+    std::ifstream bindings(sorted, std::ios::binary), records(root / "records", std::ios::binary);
+    Budget_output proof(root / k_temporal_file, std::ios::binary | std::ios::trunc);
+    Budget_output index(root / k_temporal_index, std::ios::binary | std::ios::trunc);
+    require(bindings && records && proof && index, "usage_temporal_unavailable");
+    auto header = addon::Json_value::object();
+    header.set("version", addon::Json_value(1));
+    header.set("account", account_value(account));
+    header.set("snapshot_id", addon::Json_value(snapshot_id));
+    header.set("accounting_ledger_sha256_hex", addon::Json_value(file_digest(root / "records", cancelled)));
+    addon::Sha256 digest;
+    std::uint64_t proof_offset = 0;
+    const auto append = [&](std::string_view line) {
+        budget.line(proof, line);
+        digest.update(line); digest.update("\n");
+        proof_offset += line.size() + 1;
+    };
+    append(addon::serialize_json(header));
+    std::uint64_t record_offset = 0, count = 0;
+    std::string line, accounting;
+    while (read_line(bindings, &line)) {
+        check_cancel(cancelled);
+        auto row = decode_temporal_row(line);
+        require(read_line(records, &accounting), "usage_temporal_unavailable");
+        const auto record = decode_record(accounting);
+        require(row.id == record.usage.record_id && row.total == record.usage.total_tokens &&
+            row.accounting_digest == accounting_digest(accounting), "usage_temporal_unavailable");
+        while (prior_row && id_less(prior_row->id, row.id)) next_prior();
+        if (prior_row && prior_row->id == row.id && prior_row->total == row.total &&
+            prior_row->cache_digest == row.cache_digest)
+        {
+            if (row.reason == "missing-evidence") {
+                row.instant = prior_row->instant;
+                row.reason = prior_row->reason;
+            }
+            else if (row.instant && prior_row->instant && row.instant != prior_row->instant) {
+                row.instant.reset();
+                row.reason = "unsupported";
+            }
+        }
+        const auto offsets = temporal_index_entry(record_offset, proof_offset);
+        budget.write(index, std::string_view(offsets.data(), offsets.size()));
+        append(addon::serialize_json(encode_temporal_row(row)));
+        record_offset += accounting.size() + 1;
+        ++count;
+    }
+    require(!read_line(records, &accounting), "usage_temporal_unavailable");
+    auto footer = addon::Json_value::object();
+    footer.set("end", addon::Json_value(1));
+    footer.set("count", addon::Json_value(count));
+    footer.set("sha256_hex", addon::Json_value(addon::to_hex(digest.finish())));
+    budget.line(proof, addon::serialize_json(footer));
+    proof.close(); index.close(); bindings.close(); records.close();
+    require(proof && index, "usage_storage_write_failed");
+    budget.remove(sorted);
+    sync_file(root / k_temporal_file);
+    sync_file(root / k_temporal_index);
+}
+
+void prepare_temporal(const fs::path& root, const std::optional<addon::Usage_cache_reference>& accepted,
+    const std::optional<addon::Account_context>& account, const std::string& snapshot_id,
+    const std::function<bool()>& cancelled)
+{
+    const Disk_usage manifest_delta{temporal_manifest_bytes(account, snapshot_id), 0, 0};
+    if (!active_budget->try_reserve(manifest_delta)) return;
+    try {
+        Temporal_budget budget(root);
+        if (copy_unknown_temporal(root, accepted, account, budget, cancelled)) return;
+        const auto sorted = sorted_temporal_bindings(root, budget, cancelled);
+        write_temporal_sidecar(root, sorted, accepted, account, snapshot_id, budget, cancelled);
+        return;
+    }
+    catch (const Scan_failure& failure) { if (failure.reason == "cancelled") throw; }
+    catch (const std::exception&) { check_cancel(cancelled); }
+    // This phase exclusively owns these names. Original caches, records and
+    // reserved accounting seal metadata remain intact after local refusal.
+    for (const auto& entry : fs::directory_iterator(root)) {
+        const auto name = entry.path().filename().string();
+        if (name == k_temporal_file || name == k_temporal_index || name.starts_with("temporal-run-")) {
+            remove_owned_path(entry.path());
+        }
+    }
+    active_budget->release(manifest_delta);
+}
+
+bool valid_temporal_record(const addon::Usage_record& record)
+{
+    if (!record.temporal || !addon::decode_usage_temporal(addon::encode_usage_temporal(*record.temporal), nullptr)) return false;
+    const auto encoded = addon::encode_usage_record(record, 3);
+    return addon::decode_usage_record(encoded, nullptr, 3).has_value() &&
+        addon::parse_json(addon::serialize_json(encoded), {}, nullptr).has_value();
+}
+
+class Temporal_lookup final
+{
+public:
+    Temporal_lookup(const fs::path& root, const std::optional<addon::Account_context>& account,
+        const std::string& snapshot_id)
+    {
+        try {
+            if (!fs::is_regular_file(fs::symlink_status(root / k_temporal_file)) ||
+                !fs::is_regular_file(fs::symlink_status(root / k_temporal_index))) return;
+            const auto bytes = fs::file_size(root / k_temporal_index);
+            if (bytes % 16 != 0 || bytes / 16 > Usage_scan_limits{}.candidate_records ||
+                fs::file_size(root / k_temporal_file) > Usage_scan_limits{}.candidate_bytes) return;
+            m_proof.open(root / k_temporal_file, std::ios::binary);
+            m_index.open(root / k_temporal_index, std::ios::binary);
+            m_proof_bytes = fs::file_size(root / k_temporal_file);
+            std::string line;
+            if (!m_proof || !m_index || !read_line(m_proof, &line)) return;
+            const auto header = addon::parse_json(line, {}, nullptr);
+            if (!header || !header->is_object() || header->as_object().size() != 4 ||
+                member(*header, "version") != addon::Json_value(1) || member(*header, "account") != account_value(account) ||
+                member(*header, "snapshot_id") != addon::Json_value(snapshot_id) ||
+                !digest_name(string_member(*header, "accounting_ledger_sha256_hex"))) return;
+            m_count = bytes / 16;
+        }
+        catch (const Scan_failure&) {}
+        catch (const std::exception&) {}
+    }
+
+    void apply(addon::Usage_record& record, std::string_view accounting, std::uint64_t offset,
+        const std::string& snapshot_id, const std::optional<std::string>& account)
+    {
+        try {
+            std::uint64_t first = 0, last = m_count;
+            std::array<char, 16> bytes{};
+            while (first < last) {
+                const auto middle = first + (last - first) / 2;
+                m_index.clear();
+                m_index.seekg(static_cast<std::streamoff>(middle * bytes.size()));
+                require(static_cast<bool>(m_index.read(bytes.data(), bytes.size())), "usage_temporal_unavailable");
+                if (decode_temporal_index(bytes).first < offset) first = middle + 1;
+                else last = middle;
+            }
+            if (first == m_count) return;
+            m_index.clear();
+            m_index.seekg(static_cast<std::streamoff>(first * bytes.size()));
+            require(static_cast<bool>(m_index.read(bytes.data(), bytes.size())), "usage_temporal_unavailable");
+            const auto offsets = decode_temporal_index(bytes);
+            require(offsets.first == offset && offsets.second < m_proof_bytes, "usage_temporal_unavailable");
+            m_proof.clear();
+            m_proof.seekg(static_cast<std::streamoff>(offsets.second));
+            std::string line;
+            require(read_line(m_proof, &line), "usage_temporal_unavailable");
+            const auto row = decode_temporal_row(line);
+            require(row.id == record.record_id && row.total == record.total_tokens &&
+                row.accounting_digest == accounting_digest(accounting), "usage_temporal_unavailable");
+            addon::Usage_temporal proof;
+            proof.parent = {record.record_id, record.total_tokens, snapshot_id, account};
+            proof.coverage_reason = row.reason;
+            if (row.instant && row.total != 0) proof.portions.push_back({"instant", *row.instant, {}, {}, row.total});
+            else proof.unavailable_tokens = row.total;
+            record.temporal = std::move(proof);
+            if (!valid_temporal_record(record)) record.temporal.reset();
+        }
+        catch (const Scan_failure&) { record.temporal.reset(); }
+        catch (const std::exception&) { record.temporal.reset(); }
+    }
+private:
+    std::ifstream m_proof;
+    std::ifstream m_index;
+    std::uint64_t m_count = 0;
+    std::uint64_t m_proof_bytes = 0;
+};
+
 std::uint64_t decimal(std::string_view text)
 {
     std::uint64_t value = 0;
@@ -767,7 +1376,8 @@ std::uint64_t decimal(std::string_view text)
 }
 
 addon::Usage_scan_page page_at(const fs::path& snapshot, const std::string& identifier,
-    std::uint64_t offset, const std::optional<addon::Account_context>& account, const std::function<bool()>& cancelled)
+    std::uint64_t offset, const std::optional<addon::Account_context>& account, const std::function<bool()>& cancelled,
+    const addon::Usage_scan_request* request = nullptr)
 {
     require(fs::is_directory(fs::symlink_status(snapshot)), "usage_snapshot_expired");
     const auto metadata = read_json(snapshot / "snapshot");
@@ -780,6 +1390,16 @@ addon::Usage_scan_page page_at(const fs::path& snapshot, const std::string& iden
     addon::Usage_scan_page page;
     page.scope = *encoded_scope;
     page.snapshot_id = identifier;
+    std::optional<Temporal_lookup> temporal;
+    if (request) {
+        page.account_context = request->context.account_context;
+        page.profile_storage = request->context.profile_storage;
+        // The final seal replaces only this fixed-width digest. All other
+        // context and prospective cursor bytes participate in admission.
+        page.cache_candidate = addon::Usage_cache_reference{
+            request->cache_selection->candidate_root, identifier, std::string(64, '0')};
+        temporal.emplace(snapshot, account, identifier);
+    }
     const auto& incomplete = member(*metadata, "incomplete");
     require(incomplete.is_boolean(), "usage_snapshot_invalid");
     page.incomplete_historical_coverage = incomplete.as_boolean();
@@ -796,15 +1416,39 @@ addon::Usage_scan_page page_at(const fs::path& snapshot, const std::string& iden
     input.seekg(static_cast<std::streamoff>(offset));
     std::string line;
     std::size_t bytes = 0;
+    std::size_t encoded_records_bytes = 0;
     while (page.records.size() < addon::k_max_usage_page_records && read_line(input, &line)) {
         check_cancel(cancelled);
         if (!page.records.empty() && bytes + line.size() > k_line_limit / 2) break;
+        auto record = decode_record(line).usage;
+        if (request) {
+            record.aggregate_evidence = "partial";
+            temporal->apply(record, line, offset, identifier, page.scope.source_account_key);
+            const auto next = offset + line.size() + 1;
+            page.complete = next == size;
+            page.next_cursor = page.complete ? std::nullopt : std::optional(std::to_string(next));
+            if (!addon::append_usage_page_record(page, record, encoded_records_bytes, 3)) {
+                if (!page.records.empty()) break;
+                if (record.temporal) {
+                    record.temporal->portions.clear();
+                    record.temporal->unavailable_tokens = record.total_tokens;
+                    record.temporal->coverage_reason = "capacity";
+                    if (!valid_temporal_record(record)) record.temporal.reset();
+                }
+                if (!addon::append_usage_page_record(page, record, encoded_records_bytes, 3)) {
+                    record.temporal.reset();
+                    require(addon::append_usage_page_record(page, record, encoded_records_bytes, 3),
+                        "usage_record_frame_capacity");
+                }
+            }
+        }
+        else page.records.push_back(std::move(record));
         bytes += line.size();
-        page.records.push_back(decode_record(line).usage);
         offset += line.size() + 1;
     }
     page.complete = offset == size;
     if (!page.complete) page.next_cursor = std::to_string(offset);
+    else page.next_cursor.reset();
     return page;
 }
 
@@ -857,7 +1501,7 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
                 const auto state = read_json(root / "cache-state");
                 require(state && string_member(*state, "request_sha256") == request_hash &&
                     string_member(*state, "snapshot_id") == *request.snapshot_id, "usage_snapshot_mismatch");
-                auto page = page_at(root, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled);
+                auto page = page_at(root, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled, &request);
                 page.cache_candidate = addon::Usage_cache_reference{
                     selection->candidate_root, page.snapshot_id, file_digest(root / "cache-manifest.json", cancelled)};
                 page.account_context = request.context.account_context;
@@ -948,13 +1592,17 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
         metadata.set("incomplete", addon::Json_value(incomplete));
         sync_file(work / "records");
         write_json(work / "snapshot", metadata);
-        auto page = page_at(work, identifier, 0, request.context.account_context, cancelled);
         check_cancel(cancelled);
         if (selection) {
             auto state = addon::Json_value::object();
             state.set("request_sha256", addon::Json_value(request_hash));
             state.set("snapshot_id", addon::Json_value(identifier));
             write_json(work / "cache-state", state);
+            // The SDK writes its manifest outside Budget_output. Reserve the
+            // complete original seal before optional scratch can consume space.
+            budget.reserve({cache_manifest_bytes(work, request.context.account_context, identifier), 1, 0});
+            prepare_temporal(work, selection->accepted, request.context.account_context, identifier, cancelled);
+            auto page = page_at(work, identifier, 0, request.context.account_context, cancelled, &request);
             // A surviving native session file does not prove complete aggregate history.
             for (auto& record : page.records) record.aggregate_evidence = "partial";
             page.cache_candidate = addon::seal_usage_cache_candidate(
@@ -965,6 +1613,7 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
             page.profile_storage = request.context.profile_storage;
             return page;
         }
+        auto page = page_at(work, identifier, 0, request.context.account_context, cancelled);
         auto pointer = addon::Json_value::object();
         pointer.set("snapshot_id", addon::Json_value(identifier));
         pointer.set("previous_snapshot_id", accepted.current.empty()

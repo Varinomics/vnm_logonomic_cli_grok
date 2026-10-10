@@ -65,6 +65,26 @@ not added again to the native input-plus-output total. Missing, partial, or
 incomplete costs remain unknown. Grok's 1e10 ticks per USD are converted only
 when exactly representable as whole microUSD; fractional microUSD remain unknown.
 
+The independently negotiated `usage-temporal@1` capability supplies dated activity
+on host-selected `usage-scan@3` pages. Each admitted top-level turn can carry its
+exact native total at the original strict RFC3339 `endedAt` instant, retaining
+offset and fractional precision. A timestamp without a timezone remains usable
+for accounting and supplies no instant. Zero totals have no positive portion;
+incomplete categories and unknown prices do not change the turn's proved total.
+The established accounting dates, IDs and cumulative replay semantics remain
+unchanged. `usage-scan@2` publishes its original accounting without dated evidence.
+
+Dated evidence lives in separate, independently versioned optional files. A
+stable native reparse must match the complete chosen accounting ledger; retained
+proof must match the selected account, snapshot, full original accounting digest
+and exact parent total before repository attribution is refreshed. Deleted native
+files can retain that selected proof. Conflicting instants, unavailable evidence,
+or unsupported optional files never invent dated amounts or alter accounting.
+Accounting and its final sealed inventory receive space first. Optional scratch,
+the evidence file, its index and the additional inventory entries share the
+existing physical limits; capacity refusal removes those optional files and
+preserves the complete accounting candidate.
+
 Grok forks copy billed turns without durable original-row identities. An
 ordinary fork carrying usage therefore fails the account's candidate scan with
 `usage_fork_attribution_unavailable`; the last accepted history remains intact.

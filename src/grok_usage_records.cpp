@@ -251,6 +251,13 @@ bool read_session_usage(std::istream& input, const fs::path& path,
         if (!model.empty()) record.usage.model = model;
         record.recorded_cwd = cwd;
         refresh_repository(&record);
+        const auto raw = text(row, "endedAt");
+        if (raw.size() <= addon::k_max_usage_temporal_bytes) {
+            addon::Usage_temporal proof;
+            proof.parent = {"native-proof", 1, "native-proof", std::nullopt};
+            proof.portions.push_back({"instant", raw, {}, {}, 1});
+            if (addon::decode_usage_temporal(addon::encode_usage_temporal(proof), nullptr)) record.instant = raw;
+        }
         if (!emit(record)) return false;
     }
     return true;
