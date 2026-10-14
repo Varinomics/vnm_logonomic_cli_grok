@@ -5,6 +5,11 @@
 #include <cstdio>
 #include <string>
 #include <utility>
+#include "grok_wake.h"
+#include "grok_wake_transport.h"
+#include "grok_json.h"
+#include <cstdlib>
+#include <thread>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -71,6 +76,19 @@ int main()
     if (!outcome.committed && !cancelled() &&
         (outcome.exit_code == addon::k_helper_exit_transport_failure || outcome.exit_code == addon::k_helper_exit_pending))
         outcome = client.deliver_provider_event(name, body, key, nonce);
+    if (outcome.committed && outcome.accepted && (name == "SessionStart" || name == "SessionEnd")) {
+        if (const auto* token = std::getenv(grok::k_wake_token_environment); token && !cancelled()) {
+            const auto observation = addon::serialize_json(grok::object({
+                {"operation", addon::Json_value("observe")}, {"token", addon::Json_value(token)},
+                {"transition_nonce", addon::Json_value(nonce)}, {"event", body}}));
+            // Identity follows authenticated admission and precedes journal
+            // acknowledgement. It carries no prompt text or launch authority.
+            (void)grok::exchange_wake_request(token, observation, [&](int delay) {
+                if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                return cancelled();
+            });
+        }
+    }
     if (outcome.committed) (void)client.acknowledge_provider_event(key);
     return outcome.committed && outcome.accepted ? 0 : 1;
 }

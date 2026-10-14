@@ -60,17 +60,27 @@ add_library(grok_provider STATIC
     src/grok_probes.cpp
     src/grok_usage.cpp
     src/grok_usage_records.cpp)
+target_sources(grok_provider PRIVATE
+    src/grok_wake.cpp src/grok_wake_protocol.cpp src/grok_wake_identity.cpp
+    src/grok_wake_transport_win.cpp src/grok_wake_transport_linux.cpp)
 grok_target(grok_provider)
 target_include_directories(grok_provider PUBLIC src)
 target_link_libraries(grok_provider PUBLIC logonomic_cli_addon_sdk::sdk)
+if(WIN32)
+    target_link_libraries(grok_provider PRIVATE advapi32)
+endif()
 
 add_executable(grok_adapter src/adapter.cpp)
 target_link_libraries(grok_adapter PRIVATE grok_provider)
 grok_target(grok_adapter)
 add_executable(grok_helper src/grok_helper.cpp)
+target_link_libraries(grok_helper PRIVATE grok_provider)
 grok_target(grok_helper)
 logonomic_cli_addon_add_launch_bridge(grok_launch_bridge)
 grok_target(grok_launch_bridge)
+add_executable(grok_session_bridge src/grok_session_bridge.cpp)
+target_link_libraries(grok_session_bridge PRIVATE grok_provider)
+grok_target(grok_session_bridge)
 add_executable(grok_quota_bridge
     src/grok_billing.cpp
     src/grok_billing_http.cpp
@@ -112,13 +122,14 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_adapter>" "${GROK_PACKAGE_DIRECTORY}/adapter/grok_adapter${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_helper>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_helper${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_launch_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_launch_bridge${GROK_EXECUTABLE_SUFFIX}"
+    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_session_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_session_bridge${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_quota_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_quota_bridge${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "$<TARGET_FILE:logonomic_cli_addon_index>" "${GROK_PACKAGE_DIRECTORY}"
         --third-party "assets/grok.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
         --third-party "assets/grok-dark.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
-    DEPENDS grok_adapter grok_helper grok_launch_bridge grok_quota_bridge logonomic_cli_addon_index
+    DEPENDS grok_adapter grok_helper grok_launch_bridge grok_session_bridge grok_quota_bridge logonomic_cli_addon_index
         "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
     VERBATIM)
 add_custom_target(grok_package ALL DEPENDS "${GROK_PACKAGE_DIRECTORY}/package.files.json")
@@ -130,13 +141,26 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
     return()
 endif()
 enable_testing()
-foreach(test_name IN ITEMS grok_runtime_tests grok_acp_tests grok_probe_tests grok_usage_tests)
+foreach(test_name IN ITEMS grok_runtime_tests grok_acp_tests grok_probe_tests grok_usage_tests grok_wake_protocol_tests grok_wake_identity_tests)
     add_executable(${test_name} "tests/${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE grok_provider)
     grok_target(${test_name})
     add_test(NAME ${test_name} COMMAND ${test_name})
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
 endforeach()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(grok_wake_transport_linux_tests tests/grok_wake_transport_linux_tests.cpp)
+    target_link_libraries(grok_wake_transport_linux_tests PRIVATE grok_provider)
+    grok_target(grok_wake_transport_linux_tests)
+    add_test(NAME grok_wake_transport_linux_tests COMMAND grok_wake_transport_linux_tests)
+    set_tests_properties(grok_wake_transport_linux_tests PROPERTIES TIMEOUT 30)
+endif()
+add_executable(grok_wake_package_tests tests/grok_wake_package_tests.cpp)
+target_link_libraries(grok_wake_package_tests PRIVATE grok_provider)
+grok_target(grok_wake_package_tests)
+add_dependencies(grok_wake_package_tests grok_package)
+add_test(NAME grok_wake_package_tests COMMAND grok_wake_package_tests "${GROK_PACKAGE_DIRECTORY}")
+set_tests_properties(grok_wake_package_tests PROPERTIES TIMEOUT 45)
 # The billing tests build the helper's own sources against a scripted HTTPS
 # transport; the packaged helper itself runs in grok_quota_bridge_tests.
 add_executable(grok_billing_tests tests/grok_billing_tests.cpp src/grok_billing.cpp)

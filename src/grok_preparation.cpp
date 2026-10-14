@@ -2,6 +2,7 @@
 #include "grok_accounts.h"
 #include "grok_acp.h"
 #include "grok_launcher.h"
+#include "grok_wake.h"
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/session_contracts.h>
 #include <algorithm>
@@ -191,6 +192,28 @@ void prepare_resume(addon::Invocation_context& context)
     result.patch.set.emplace_back("GROK_HOME", *home);
     result.patch.profile_storage = request->context.profile_storage;
     result.patch.account_context = request->context.account_context;
+    if (request->context.session_wake) {
+        auto launch = result.patch;
+        launch.argv = *argv;
+        auto wake_arguments = command->prefix_arguments;
+        wake_arguments.insert(wake_arguments.end(), {"--resume", id->as_string()});
+        Environment environment;
+        for (const auto& member : request->context.launch_environment->effective_environment.as_object())
+            environment.emplace_back(member.name, member.value.as_string());
+        const auto help = run_probe({argv->front(), "--help"}, environment,
+            request->context.working_directory, 3000, context);
+        prepare_wake(launch, wake_arguments, help ? help->output : std::string{});
+        result.patch.session_wake = launch.session_wake;
+        if (launch.session_wake && launch.session_wake->available) {
+            result.patch.set = std::move(launch.set);
+#ifdef _WIN32
+            result.process.executable = "helpers/grok_session_bridge.exe";
+#else
+            result.process.executable = "helpers/grok_session_bridge";
+#endif
+            result.process.argv.assign(launch.argv->begin() + 1, launch.argv->end());
+        }
+    }
     result.acknowledgment.record_digest_hex = addon::resume_record_digest_hex(request->resume_record);
     context.succeed(addon::encode_resume_prepare_result(result, 2));
 }
@@ -225,6 +248,8 @@ void handle_preparation(addon::Invocation_context& context)
     patch.account_context = request->account_context;
     patch.profile_storage = request->profile_storage;
     if (!command || !interactive_arguments(command->prefix_arguments)) {
+        if (request->session_wake) patch.session_wake = addon::Session_wake_preparation{
+            false, addon::Json_value::object(), "native_interactive_launch_unavailable"};
         patch.disposition = addon::Launch_disposition{false, false, false};
         context.succeed(addon::encode_launch_patch(patch, 3)); return;
     }
@@ -262,6 +287,7 @@ void handle_preparation(addon::Invocation_context& context)
     patch.set.emplace_back("GROK_HOME", *profile);
     patch.apply_managed_configuration = true;
     patch.disposition = addon::Launch_disposition{true, true, true};
+    if (request->session_wake) prepare_wake(patch, command->prefix_arguments, help->output);
     context.succeed(addon::encode_launch_patch(patch, 3));
 }
 } // namespace grok

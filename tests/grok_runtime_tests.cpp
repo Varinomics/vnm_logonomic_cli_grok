@@ -3,6 +3,7 @@
 #include "grok_preparation.h"
 #include "grok_launcher.h"
 #include "grok_lifecycle.h"
+#include "grok_wake.h"
 #include <logonomic_cli_addon/json.h>
 #include <iostream>
 #include <filesystem>
@@ -54,6 +55,23 @@ int main(int argc, char** argv)
         std::cout << "Grok Build --session-id --resume\n"; return 0;
     }
     try {
+        require(grok::wake_compatible_arguments({"--model", "grok-4.6", "--effort=high"}),
+            "native model options rejected by wake launch");
+        require(grok::wake_compatible_arguments({"--resume", "8e18215e-f612-4131-95dd-7890139a41ae"}),
+            "exact native resume rejected by wake launch");
+        for (const auto& arguments : std::vector<std::vector<std::string>>{
+            {"--allow", "bash"}, {"--deny", "write"}, {"--no-subagents"}, {"--disable-web-search"},
+            {"--storage-mode", "memory"}, {"--no-leader"}, {"--leader-socket", "other"},
+            {"--permission-mode", "default"}, {"--unknown-future-option"}, {"--model"}}) {
+            require(!grok::wake_compatible_arguments(arguments), "standalone policy override lost through leader launch");
+            addon::Launch_patch retained;
+            retained.argv = std::vector<std::string>{"grok", "--no-leader"};
+            retained.argv->insert(retained.argv->end(), arguments.begin(), arguments.end());
+            const auto original = retained.argv;
+            grok::prepare_wake(retained, arguments, "--leader-socket");
+            require(retained.session_wake && !retained.session_wake->available && retained.argv == original,
+                "unavailable wake changed original standalone invocation");
+        }
         const auto launcher = grok::recognize_launcher("GROK_HOME='profiles/../selected' grok --model grok-4.6");
         require(launcher && launcher->environment_names == std::vector<std::string>{"GROK_HOME"}, "authored assignment name lost");
         require(launcher->prefix_arguments == std::vector<std::string>{"--model", "grok-4.6"}, "model arguments lost");

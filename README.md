@@ -38,6 +38,45 @@ Exact resume uses the saved native session UUID and native `--resume`; conflicti
 launcher identity or workspace options are refused. The host applies the managed
 hook transform before the resumed launch and admits its actual SessionStart.
 
+Optional `session-wake@1` prepares an isolated native leader together with the
+original interactive TUI and a persistent ACP control client. A mailbox wake
+checks that the exact native session and working directory remain resident, then
+submits a native `session/prompt`. Its receipt means Grok acknowledged the prompt
+in its queue; it does not mean the mailbox was read. The original composer and
+approval UI remain with the TUI. The control client never answers permission,
+question, or elicitation requests, and never loads or replaces a conversation.
+The selected profile, launch environment and managed hooks are inherited by the
+private leader. Existing launches without this preparation cannot be woken.
+
+Wake requires the authenticated current-launch SessionStart identity and its
+exact host transition nonce, followed by an unscoped native roster check. A
+resume of the same native UUID must still match the new transition nonce.
+Changing or ending the native conversation resets this identity. Busy, pause
+and permission state remain independent: a queued notification cannot answer a
+permission request or resume a host-paused session.
+
+Model, effort, approval, exact session-ID and exact resume options may use this
+launch form. Other CLI options retain standalone execution and report wake
+unavailable, including permission rules, disabled subagents, disabled web search,
+and explicitly selected leader settings. On Windows, failure to start an
+isolated leader falls back to the original standalone invocation after the
+private job has been settled. On Linux, a failed startup after any native process
+was admitted ends the launch so the terminal owner can settle detached children;
+fallback is limited to failures before native admission. The live resident check
+also rejects a TUI which chose its native standalone fallback. There is no
+provider version ceiling.
+
+Windows contains the leader, TUI and control client in a nested kill-on-close
+job. Linux preserves the terminal process group and relies on Logonomic's
+maintained PTY custody owner to settle orphaned descendants, including native
+leader reconnects that change process group. The helper is an indexed package
+executable intended for that managed terminal launch. TUI exit or leader failure
+ends the private runtime; wake requests never spawn another provider process.
+Private control IPC is limited to the current OS user. A lost response after
+submission is uncertain and is never automatically replayed. The live control
+connection retains up to 4096 notification receipts without eviction; beyond
+that bound further wake is unavailable until a new managed launch.
+
 Structured implementation and delegated tasks use the native ACP stdio agent.
 Delegation supplies the host's task-control MCP servers, verifies their native
 session catalog reports ready and exposes every required action, then submits the

@@ -20,6 +20,19 @@
     "crates/codegen/xai-grok-shell/src/agent/mvp_agent/session_lifecycle.rs"
   ],
   "forward_policy": "The source snapshot records evidence, not an upper version bound. Incoming protocol and persisted records undergo structural and identity validation.",
+  "session_wake": {
+    "source_snapshot": "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8",
+    "contracts": [
+      "crates/codegen/xai-grok-pager/src/acp/mod.rs",
+      "crates/codegen/xai-grok-shell/src/leader/mod.rs",
+      "crates/codegen/xai-grok-shell/src/leader/server.rs",
+      "crates/codegen/xai-grok-shell/src/leader/transport.rs",
+      "crates/codegen/xai-grok-shell/src/agent/handlers/session.rs",
+      "crates/codegen/xai-grok-pager/src/app/cli.rs",
+      "crates/codegen/xai-grok-pager/src/app/mod.rs"
+    ],
+    "wire": "Persistent native stdio client: initialize, authenticated current-launch SessionStart identity and transition nonce, unscoped _x.ai/sessions/list with exact resident identity, session/prompt with correlated _meta.promptId and _x.ai/queue/changed admission. No session/load or callback responses. Native TUI terminal/filesystem reverse-client options are excluded; its supported interactive requests broadcast to all session subscribers."
+  },
   "icons": {
     "upstream": "https://github.com/lobehub/lobe-icons",
     "license": "MIT",

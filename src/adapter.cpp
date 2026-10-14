@@ -5,6 +5,7 @@
 #include "grok_preparation.h"
 #include "grok_probes.h"
 #include "grok_usage.h"
+#include "grok_wake.h"
 #include <logonomic_cli_addon/profile_storage.h>
 #include <exception>
 namespace {
@@ -39,6 +40,7 @@ void invoke(addon::Invocation_context& context)
         else if (capability == "usage-scan") grok::handle_usage(context);
         else if (capability == "managed-configuration") grok::transform_configuration(context);
         else if (capability == "helper-ingress") grok::handle_lifecycle(context);
+        else if (capability == "session-wake") grok::handle_wake(context);
         else if (capability == "profile-storage" && context.request().operation == "acknowledge") {
             const auto* value = context.request().payload.find("profile_storage");
             const auto storage = value ? addon::decode_profile_storage_context(*value, nullptr) : std::nullopt;
@@ -67,6 +69,7 @@ int main()
         {"auth-status", 2}, {"quota", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"usage-temporal", 1},
         {"lifecycle-events", 2}, {"helper-ingress", 2}, {"coordination-delivery", 1},
         {"model-context-delivery", 1}, {"interactive-resume", 2}, {"structured-session", 2}, {"delegated-session", 2},
+        {"session-wake", 1},
     };
     addon::Adapter_runtime runtime(std::move(options));
     runtime.set_invoke_handler(invoke);
