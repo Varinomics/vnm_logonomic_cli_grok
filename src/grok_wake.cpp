@@ -2,6 +2,7 @@
 #include "grok_wake_transport.h"
 #include "grok_json.h"
 #include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/package_source.h>
 #include <filesystem>
 #include <algorithm>
 
@@ -86,9 +87,13 @@ void handle_wake(addon::Invocation_context& context)
         else context.succeed(addon::encode_session_wake_readiness({false, std::move(reason)}));
     };
     const auto token = text(target->binding, "token");
+    std::error_code path_error;
+    const bool same_bridge = !target->launcher_argv.empty() && std::filesystem::equivalent(
+        addon::path_from_utf8(target->launcher_argv.front()),
+        addon::path_from_utf8(session_bridge_path()), path_error) && !path_error;
     if (text(target->binding, "transport") != "grok-private-leader-v1" || target->binding.as_object().size() != 2 ||
         token.size() != 32 || token.find_first_not_of("0123456789abcdef") != std::string::npos ||
-        target->launcher_argv.size() < 4 || target->launcher_argv[0] != session_bridge_path() ||
+        target->launcher_argv.size() < 4 || !same_bridge ||
         target->launcher_argv[1] != "--serve" || target->launcher_argv[2] != token) {
         unavailable("native_launch_binding_unavailable"); return;
     }

@@ -51,6 +51,7 @@ public:
     // Call immediately before attempting to write an exchange with
     // writes_prompt=true: a partial write can already have submitted a turn.
     void          prompt_write_started();
+    Wake_exchange abandon_request(std::string reason);
     Wake_exchange transport_closed(std::string reason);
 
     bool               initialized()       const { return m_initialized; }

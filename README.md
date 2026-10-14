@@ -52,8 +52,10 @@ Wake requires the authenticated current-launch SessionStart identity and its
 exact host transition nonce, followed by an unscoped native roster check. A
 resume of the same native UUID must still match the new transition nonce.
 Changing or ending the native conversation resets this identity. Busy, pause
-and permission state remain independent: a queued notification cannot answer a
-permission request or resume a host-paused session.
+and permission state remain independent. The control client does not answer
+approval requests or issue resume commands. The host defers new notifications
+after a confirmed interruption; notifications already accepted by Grok retain
+its native queue behavior and may run after the current turn is cancelled.
 
 Model, effort, approval, exact session-ID and exact resume options may use this
 launch form. Other CLI options retain standalone execution and report wake

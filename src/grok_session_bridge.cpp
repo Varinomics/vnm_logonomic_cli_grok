@@ -82,7 +82,7 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
             // Once a caller leaves, do not turn a late resident lookup into a
             // fresh submission. A partially written prompt remains uncertain;
             // this connection is never reconnected or silently retried.
-            consume_results(protocol.transport_closed("native_request_cancelled"));
+            consume_results(protocol.abandon_request("native_request_cancelled"));
             request.reset();
         }
         for (const auto& line : events.control_lines) send(protocol.receive(line));
@@ -140,7 +140,7 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
         }
         if (request) {
             if (Clock::now() >= request->deadline) {
-                consume_results(protocol.transport_closed("native_control_timeout"));
+                consume_results(protocol.abandon_request("native_control_timeout"));
                 if (request) { unavailable(request->notify, "native_control_timeout"); request.reset(); }
             }
             else if (!protocol.failure_reason().empty()) {

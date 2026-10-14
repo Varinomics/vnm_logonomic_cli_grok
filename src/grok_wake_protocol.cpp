@@ -175,6 +175,23 @@ Wake_exchange Wake_protocol::transport_closed(std::string reason)
     return fail(std::move(reason));
 }
 
+Wake_exchange Wake_protocol::abandon_request(std::string reason)
+{
+    if (m_pending && m_pending->write_started) {
+        return fail(std::move(reason));
+    }
+    // A caller can cancel a roster read while the persistent ACP connection
+    // remains healthy. Retire its RPC ID so a late reply cannot submit a turn.
+    m_info_request_id.clear();
+    m_ready = false;
+    m_failure_reason = std::move(reason);
+    if (!m_pending) {
+        return {};
+    }
+    m_prompt_requests.erase(m_pending->request_id);
+    return finish_notification(Wake_outcome::UNAVAILABLE, m_failure_reason);
+}
+
 Wake_exchange Wake_protocol::receive(std::string_view complete_json_line)
 {
     if (m_closed) {

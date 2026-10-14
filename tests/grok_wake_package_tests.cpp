@@ -108,6 +108,26 @@ int main(int argc, char** argv)
             std::pair<std::string, std::string>{"GROK_LOGONOMIC_WAKE_TOKEN", resumed->process.argv[1]}) != resumed->patch.set.end(),
             "resumed helper did not inherit its exact fresh private endpoint");
 
+        const auto resumed_helper = options.package_directory / resumed->process.executable.path;
+        const auto helper_bytes   = resumed_helper.generic_u8string();
+        target.launcher_argv = {std::string(helper_bytes.begin(), helper_bytes.end())};
+        target.launcher_argv.insert(target.launcher_argv.end(), resumed->process.argv.begin(), resumed->process.argv.end());
+        target.binding = resumed->patch.session_wake->binding;
+        const auto resumed_readiness = addon::decode_session_wake_readiness(invoke({"session-wake", 1}, "inspect",
+            addon::encode_session_wake_inspect_request({target})), &failure);
+        check(resumed_readiness && resumed_readiness->reason == "native_control_unavailable",
+            "host-resolved resumed helper spelling failed the launch binding");
+        const auto resumed_notification = addon::decode_session_wake_notify_result(invoke({"session-wake", 1}, "notify",
+            addon::encode_session_wake_notify_request({target, "resumed-notification", "Read the mailbox."})), &failure);
+        check(resumed_notification && resumed_notification->reason == "native_control_unavailable",
+            "resumed notification failed the launch binding");
+
+        target.launcher_argv.front() = addon::path_to_utf8(native);
+        const auto wrong_helper = addon::decode_session_wake_readiness(invoke({"session-wake", 1}, "inspect",
+            addon::encode_session_wake_inspect_request({target})), &failure);
+        check(wrong_helper && wrong_helper->reason == "native_launch_binding_unavailable",
+            "a different executable passed the launch binding");
+
         prepare.launcher.script_body += " --deny write";
         const auto restricted = addon::decode_launch_patch(invoke({"launch-preparation", 3}, "prepare",
             addon::encode_prepare_request(prepare, 3)), &failure, 3);

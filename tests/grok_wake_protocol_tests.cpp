@@ -311,6 +311,30 @@ void retained_notification_capacity()
     require_result(protocol.notify("mailbox-4095", "Read your mailbox."), Wake_outcome::ACCEPTED, "mailbox-4095");
 }
 
+void abandoned_notification_retries()
+{
+    for (const bool write_started : {false, true}) {
+        Wake_protocol protocol;
+        initialize(protocol);
+        inspect(protocol);
+        prepare_prompt(protocol);
+        if (write_started) {
+            protocol.prompt_write_started();
+        }
+        const auto expected = write_started ? Wake_outcome::UNCERTAIN : Wake_outcome::UNAVAILABLE;
+        require_result(protocol.abandon_request("native_request_cancelled"), expected);
+        if (write_started) {
+            require_result(protocol.notify("mailbox-17", "Read your mailbox."), Wake_outcome::UNCERTAIN);
+        }
+        else {
+            inspect(protocol);
+            prepare_prompt(protocol);
+            protocol.prompt_write_started();
+            require_result(protocol.receive(queued("original-session", "mailbox-17")), Wake_outcome::ACCEPTED);
+        }
+    }
+}
+
 void native_directory_identity()
 {
     namespace fs = std::filesystem;
@@ -369,6 +393,7 @@ int main()
         roster_rejects_nonresident_or_remote_sessions();
         resident_identity_and_protocol_failures();
         transport_outcomes();
+        abandoned_notification_retries();
         retained_notification_capacity();
         native_directory_identity();
         std::cout << "Grok native wake protocol tests passed\n";

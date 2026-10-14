@@ -161,6 +161,17 @@ grok_target(grok_wake_package_tests)
 add_dependencies(grok_wake_package_tests grok_package)
 add_test(NAME grok_wake_package_tests COMMAND grok_wake_package_tests "${GROK_PACKAGE_DIRECTORY}")
 set_tests_properties(grok_wake_package_tests PROPERTIES TIMEOUT 45)
+# Link the production request loop to a scripted runtime without replacing its
+# cancellation/deadline handling or starting a native provider process.
+add_library(grok_wake_bridge_fixture OBJECT src/grok_session_bridge.cpp)
+grok_target(grok_wake_bridge_fixture)
+target_compile_definitions(grok_wake_bridge_fixture PRIVATE
+    main=grok_fixture_entry wmain=grok_fixture_wentry)
+add_executable(grok_wake_bridge_tests tests/grok_wake_bridge_tests.cpp)
+target_link_libraries(grok_wake_bridge_tests PRIVATE grok_wake_bridge_fixture grok_provider)
+grok_target(grok_wake_bridge_tests)
+add_test(NAME grok_wake_bridge_tests COMMAND grok_wake_bridge_tests)
+set_tests_properties(grok_wake_bridge_tests PROPERTIES TIMEOUT 45)
 # The billing tests build the helper's own sources against a scripted HTTPS
 # transport; the packaged helper itself runs in grok_quota_bridge_tests.
 add_executable(grok_billing_tests tests/grok_billing_tests.cpp src/grok_billing.cpp)
