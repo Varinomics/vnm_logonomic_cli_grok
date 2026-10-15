@@ -1,9 +1,9 @@
 #include "grok_wake_transport.h"
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 
+#include <logonomic_cli_addon/ids.h>
 #include <fcntl.h>
-#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -58,15 +58,7 @@ private:
 
 std::string unique_token()
 {
-    std::array<unsigned char, 16> bytes{};
-    require(::getrandom(bytes.data(), bytes.size(), 0) == static_cast<ssize_t>(bytes.size()), "random token");
-    std::string result;
-    constexpr char k_digits[] = "0123456789abcdef";
-    for (const auto value : bytes) {
-        result += k_digits[value >> 4];
-        result += k_digits[value & 15];
-    }
-    return result;
+    return addon::random_nonce_hex();
 }
 
 std::string directory_for(std::string_view token)
@@ -88,6 +80,11 @@ int native_fixture(const std::vector<std::string>& arguments)
     if (arguments.back() == "stdio") {
         std::string line;
         while (std::getline(std::cin, line)) {
+            if (line == "close-control") {
+                if (::close(STDIN_FILENO) != 0 || ::close(STDOUT_FILENO) != 0) return 4;
+                std::ofstream(directory / "fixture-control-closed") << "closed\n";
+                while (true) ::pause();
+            }
             if (line == "oversized-line") std::cout << std::string(1024 * 1024 + 1, 'a') << '\n' << std::flush;
             else std::cout << line << '\n' << std::flush;
         }
@@ -97,11 +94,12 @@ int native_fixture(const std::vector<std::string>& arguments)
     std::ofstream(directory / (leader ? "fixture-leader.pid" : "fixture-tui.pid")) << ::getpid();
     int listener = -1;
     if (leader) {
-        listener = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
         sockaddr_un address{};
         address.sun_family = AF_UNIX;
         std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
-        if (listener < 0 || ::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+        if (listener < 0 || ::fcntl(listener, F_SETFD, FD_CLOEXEC) != 0 ||
+            ::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
             ::chmod(socket_path.c_str(), 0600) != 0 || ::listen(listener, 4) != 0) return 3;
     }
     while (true) ::pause();
@@ -123,7 +121,7 @@ public:
     ~Fixture()
     {
         m_runtime.reset();
-        for (const auto* name : {"fixture-leader.pid", "fixture-tui.pid"}) {
+        for (const auto* name : {"fixture-leader.pid", "fixture-tui.pid", "fixture-control-closed"}) {
             (void)::unlink((m_directory + "/" + name).c_str());
         }
         (void)::rmdir(m_directory.c_str());
@@ -180,6 +178,7 @@ void transport_contract(const std::string& executable)
     require(fixture.m_runtime->write_control("oversized-line\nstream-preserved\n"), "large native event fixture");
     const auto large_deadline = Clock::now() + std::chrono::seconds(2);
     bool preserved = false;
+    // Fixed sleeps throttle this oversized fixture across small socket buffers.
     while (Clock::now() < large_deadline && !preserved) {
         const auto events = fixture.m_runtime->poll();
         require(!events.control_closed, "oversized native event does not disconnect original observer");
@@ -187,9 +186,20 @@ void transport_contract(const std::string& executable)
             require(line.size() <= 1024 * 1024, "native event memory bound");
             if (line == "stream-preserved") preserved = true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::yield();
     }
     require(preserved, "native stream remains framed after oversized event");
+
+    require(fixture.m_runtime->write_control("close-control\n"), "request native peer closure");
+    const auto close_deadline = Clock::now() + std::chrono::seconds(2);
+    const auto closed_marker = fs::path(fixture.m_directory) / "fixture-control-closed";
+    // Observe closure without letting runtime polling retire the sending socket.
+    while (Clock::now() < close_deadline && !fs::exists(closed_marker)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    require(fs::exists(closed_marker), "native peer closes both socket descriptors before the write");
+    require(!fixture.m_runtime->write_control("unaccepted-after-close\n"),
+        "closed native peer fails without SIGPIPE terminating the bridge");
 }
 
 void uncertain_delivery_contract(const std::string& executable)
@@ -246,11 +256,19 @@ int main(int argc, char** argv)
     std::vector<std::string> arguments(argv, argv + argc);
     if (argc > 1) return native_fixture(arguments);
     try {
-        const auto executable = fs::canonical("/proc/self/exe").string();
+        require(std::signal(SIGPIPE, SIG_DFL) != SIG_ERR, "SIGPIPE has its default disposition");
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGPIPE);
+        require(::sigprocmask(SIG_UNBLOCK, &signals, nullptr) == 0, "SIGPIPE is unblocked");
+        const auto executable = fs::canonical(argv[0]).string();
+        require(grok::session_bridge_path() ==
+            (fs::path(executable).parent_path().parent_path() / "helpers" / "grok_session_bridge").string(),
+            "session bridge resolves beside the original package executable");
         transport_contract(executable);
         uncertain_delivery_contract(executable);
         unavailable_and_exit_contract(executable);
-        std::cout << "Linux wake transport contracts passed\n";
+        std::cout << "POSIX wake transport contracts passed\n";
         return 0;
     }
     catch (const std::exception& error) {

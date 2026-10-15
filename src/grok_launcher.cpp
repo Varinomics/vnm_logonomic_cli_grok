@@ -95,8 +95,16 @@ public:
     {
         if (!m_active) return;
         if (!m_preexisting) {
+#if defined(__APPLE__)
+            sigset_t pending{};
+            if (sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
+                int signal_number = 0;
+                (void)sigwait(&m_signals, &signal_number);
+            }
+#else
             timespec zero{};
             while (sigtimedwait(&m_signals, nullptr, &zero) >= 0) {}
+#endif
         }
         pthread_sigmask(SIG_SETMASK, &m_previous, nullptr);
     }
@@ -257,12 +265,12 @@ std::optional<Probe_output> probe(
     Pipe_signal_guard signals;
     if (!signals.active()) return std::nullopt;
     int output_pipe[2], errors_pipe[2];
-    if (pipe2(output_pipe, O_CLOEXEC) != 0) return std::nullopt;
-    if (pipe2(errors_pipe, O_CLOEXEC) != 0) {
+    if (!addon::open_cloexec_pipe(output_pipe)) return std::nullopt;
+    if (!addon::open_cloexec_pipe(errors_pipe)) {
         close(output_pipe[0]); close(output_pipe[1]); return std::nullopt;
     }
     int input_pair[2]{-1, -1};
-    if (exchange && pipe2(input_pair, O_CLOEXEC) != 0) {
+    if (exchange && !addon::open_cloexec_pipe(input_pair)) {
         for (int descriptor : {output_pipe[0], output_pipe[1], errors_pipe[0], errors_pipe[1]}) close(descriptor);
         return std::nullopt;
     }

@@ -24,7 +24,7 @@ int main(int argc, char** argv)
     }
     if (argc != 2) return 2;
     try {
-        const auto directory = fs::temp_directory_path() / ("grok-wake-package-" + addon::random_nonce_hex());
+        const auto directory = fs::canonical(fs::temp_directory_path()) / ("grok-wake-package-" + addon::random_nonce_hex());
         fs::create_directories(directory / "native");
         struct Cleanup {
             fs::path path;

@@ -98,7 +98,7 @@ int main(int argc, char** argv)
         require(!config_context.succeeded && config_context.output == addon::Json_value("managed_hook_file_conflict"),
             "managed transform overwrote an existing foreign hook file");
         namespace fs = std::filesystem;
-        const auto root = fs::temp_directory_path() / ("grok-prepare-" + addon::random_nonce_hex());
+        const auto root = fs::canonical(fs::temp_directory_path()) / ("grok-prepare-" + addon::random_nonce_hex());
         fs::create_directories(root / "profiles" / "native");
         struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
 #ifdef _WIN32

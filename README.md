@@ -1,7 +1,7 @@
 # Logonomic Grok Build add-on
 
 Standalone C++20 package `logonomic.cli.grok`, using the public Logonomic CLI
-add-on SDK. Windows and Linux x86-64 artifacts are built separately.
+add-on SDK. Windows/Linux x86-64 and macOS ARM64 artifacts are built separately.
 
 The provider preserves the selected `GROK_HOME` profile. Account discovery uses
 Grok's platform home convention and empty-override behavior. Authentication
@@ -18,8 +18,8 @@ is rounded down to the SDK's millisecond precision. Malformed or stale periods,
 and durations that cannot be expressed exactly in whole minutes, fail the
 refresh instead of reporting absent quotas. While the selected profile's
 credential is expired, each quota refresh fails until Grok
-itself refreshes the credential. On Linux the helper uses libcurl, so building
-the package needs its development files.
+itself refreshes the credential. On Linux and macOS the helper uses libcurl, so
+building the package needs its development files.
 
 Native file hooks report session and turn starts through authenticated SDK
 helper ingress. Successful turn completion and subagent completion are not
@@ -62,16 +62,19 @@ launch form. Other CLI options retain standalone execution and report wake
 unavailable, including permission rules, disabled subagents, disabled web search,
 and explicitly selected leader settings. On Windows, failure to start an
 isolated leader falls back to the original standalone invocation after the
-private job has been settled. On Linux, a failed startup after any native process
-was admitted ends the launch so the terminal owner can settle detached children;
-fallback is limited to failures before native admission. The live resident check
+private job has been settled. On Linux and macOS, a failed startup after any native
+process was admitted ends the launch so the terminal owner can settle its owned
+processes; fallback is limited to failures before native admission. The live resident check
 also rejects a TUI which chose its native standalone fallback. There is no
 provider version ceiling.
 
 Windows contains the leader, TUI and control client in a nested kill-on-close
 job. Linux preserves the terminal process group and relies on Logonomic's
 maintained PTY custody owner to settle orphaned descendants, including native
-leader reconnects that change process group. The helper is an indexed package
+leader reconnects that change process group. macOS inherits the controlling
+terminal and original process group, relying on the retained PTY owner to settle
+its owned process groups in that original terminal session. Deliberately detached
+descendants remain outside that Darwin cleanup scope. The helper is an indexed package
 executable intended for that managed terminal launch. TUI exit or leader failure
 ends the private runtime; wake requests never spawn another provider process.
 Private control IPC is limited to the current OS user. A lost response after
@@ -157,8 +160,8 @@ queue and toolchain instructions for configuration and compilation. CTest
 registers runtime, account/probe, usage, package-validation and conformance
 fixtures. Building a package does not activate it or migrate user data.
 
-The package recipe proves the Windows/Linux x86-64 compiler target during
-configuration. `cmake --install` exports a fresh artifact beneath its install-time
+The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
+during configuration. `cmake --install` exports a fresh artifact beneath its install-time
 prefix and preserves executable permissions. An existing per-package destination,
 including a dangling symlink, is refused. POSIX `DESTDIR` staging is supported;
 nonempty `DESTDIR` with a drive-letter prefix is refused. Export is not atomic:

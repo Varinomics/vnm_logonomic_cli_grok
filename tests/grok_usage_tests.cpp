@@ -563,7 +563,7 @@ void opaque_temporal_contract(const fs::path& root)
 
 int main(int argc, char** argv)
 {
-    const auto root = fs::temp_directory_path() / ("grok-usage-" + std::to_string(
+    const auto root = fs::canonical(fs::temp_directory_path()) / ("grok-usage-" + std::to_string(
         std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
         fs::create_directory(root);

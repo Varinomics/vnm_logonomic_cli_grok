@@ -470,7 +470,7 @@ std::optional<Fingerprint> fingerprint(const fs::path& path)
 bool fingerprint_matches(const addon::Json_value& metadata, const Fingerprint& value)
 {
     if (member(metadata, "size") != addon::Json_value(std::to_string(value.size))) return false;
-    if (member(metadata, "modified") == addon::Json_value(std::to_string(value.modified.time_since_epoch().count()))) return true;
+    if (member(metadata, "modified") == addon::Json_value(addon::file_time_ticks_text(value.modified))) return true;
     return false;
 }
 
@@ -509,7 +509,7 @@ void refresh_file(const fs::path& path, const fs::path& work,
     const bool current = metadata && member(*metadata, "revision") == addon::Json_value(k_parser_revision);
     if (!force && current && fingerprint_matches(*metadata, *before) &&
         member(*metadata, "summary_size") == addon::Json_value(std::to_string(summary_before->size)) &&
-        member(*metadata, "summary_modified") == addon::Json_value(std::to_string(summary_before->modified.time_since_epoch().count()))) return;
+        member(*metadata, "summary_modified") == addon::Json_value(addon::file_time_ticks_text(summary_before->modified))) return;
     std::ifstream input(path, std::ios::binary);
     if (!input) { *incomplete = true; return; }
     const auto pending = work / (key + ".pending-cache");
@@ -519,9 +519,9 @@ void refresh_file(const fs::path& path, const fs::path& work,
     next.set("revision", addon::Json_value(k_parser_revision));
     next.set("source", addon::Json_value(source));
     next.set("size", addon::Json_value(std::to_string(before->size)));
-    next.set("modified", addon::Json_value(std::to_string(before->modified.time_since_epoch().count())));
+    next.set("modified", addon::Json_value(addon::file_time_ticks_text(before->modified)));
     next.set("summary_size", addon::Json_value(std::to_string(summary_before->size)));
-    next.set("summary_modified", addon::Json_value(std::to_string(summary_before->modified.time_since_epoch().count())));
+    next.set("summary_modified", addon::Json_value(addon::file_time_ticks_text(summary_before->modified)));
     // One replacement binds the source fingerprints to their complete parsed records.
     write_line(output, addon::serialize_json(next));
     std::string error;
@@ -895,7 +895,7 @@ Native_times matching_native_times(const fs::path& cache_path,
     const auto summary_before = fingerprint(source.parent_path() / "summary.json");
     if (!before || !summary_before || !fingerprint_matches(header, *before) ||
         member(header, "summary_size") != addon::Json_value(std::to_string(summary_before->size)) ||
-        member(header, "summary_modified") != addon::Json_value(std::to_string(summary_before->modified.time_since_epoch().count())))
+        member(header, "summary_modified") != addon::Json_value(addon::file_time_ticks_text(summary_before->modified)))
     {
         return times;
     }
@@ -939,7 +939,7 @@ bool valid_temporal_sidecar(const fs::path& root, const std::optional<addon::Acc
         const auto proof_bytes = fs::file_size(root / k_temporal_file);
         const auto index_bytes = fs::file_size(root / k_temporal_index);
         const auto remaining = active_budget->limits().candidate_bytes -
-            std::min(records_bytes, active_budget->limits().candidate_bytes);
+            std::min<std::uintmax_t>(records_bytes, active_budget->limits().candidate_bytes);
         if (proof_bytes > remaining || index_bytes > remaining - proof_bytes || index_bytes % 16 != 0 ||
             index_bytes / 16 > active_budget->limits().candidate_records) return false;
         std::ifstream proof(root / k_temporal_file, std::ios::binary);
