@@ -42,14 +42,7 @@ void invoke(addon::Invocation_context& context)
         else if (capability == "helper-ingress") grok::handle_lifecycle(context);
         else if (capability == "session-wake") grok::handle_wake(context);
         else if (capability == "profile-storage" && context.request().operation == "acknowledge") {
-            const auto* value = context.request().payload.find("profile_storage");
-            const auto storage = value ? addon::decode_profile_storage_context(*value, nullptr) : std::nullopt;
-            if (!storage || context.request().payload.as_object().size() != 1) {
-                context.fail(addon::Result_status::FAILED, "profile_storage_mismatch"); return;
-            }
-            auto result = addon::Json_value::object();
-            result.set("profile_storage", addon::profile_storage_member(*storage));
-            context.succeed(std::move(result));
+            addon::acknowledge_profile_storage(context);
         }
         else grok::handle_preparation(context);
     }
