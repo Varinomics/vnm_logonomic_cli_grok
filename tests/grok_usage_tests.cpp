@@ -44,8 +44,7 @@ std::string summary(std::string_view kind = {}, bool fork = false, std::string_v
     return addon::serialize_json(result);
 }
 
-std::string usage(int input = 20, bool partial = false, bool incomplete = false,
-    std::optional<std::int64_t> cost_ticks = 20000, std::string_view session_id = "session-a")
+std::string usage(int input = 20, bool incomplete = false, std::string_view session_id = "session-a")
 {
     auto row = addon::Json_value::object();
     row.set("turnNumber", addon::Json_value(1));
@@ -56,10 +55,6 @@ std::string usage(int input = 20, bool partial = false, bool incomplete = false,
     row.set("cacheCreationTokens", addon::Json_value(3));
     row.set("reasoningTokens", addon::Json_value(2));
     row.set("totalTokens", addon::Json_value(input + 5));
-    if (cost_ticks) {
-        row.set("costUsdTicks", addon::Json_value(*cost_ticks));
-    }
-    row.set("costIsPartial", addon::Json_value(partial));
     row.set("usageIsIncomplete", addon::Json_value(incomplete));
     auto rows = addon::Json_value::array();
     rows.push_back(row);
@@ -92,49 +87,12 @@ void exercise(const fs::path& root)
     const auto& row = first->records.front();
     check(row.total_tokens == 25 && row.input.value == 20 && row.output.value == 5,
         "cache and reasoning subsets do not inflate input plus output");
-    check(row.cache_read.value == 7 && row.cache_creation.value == 3 && row.cost_microusd.value == 2,
-        "categories retained and exact tick prices convert to whole microUSD");
+    check(row.cache_read.value == 7 && row.cache_creation.value == 3, "cache categories retained");
     check(row.source_counter_semantics == "per_event_sum",
         "native turn deltas retain per-event source semantics");
     addon::Contract_failure failure;
     check(addon::decode_usage_scan_result(addon::encode_usage_scan_result(*first, 2), &failure, 2).has_value(),
         "native usage page satisfies the host usage-scan contract");
-
-    // Native ticks are 1e10/USD; usage-scan requires exact integer microUSD.
-    struct Cost_case
-    {
-        std::optional<std::int64_t> ticks;
-        bool partial;
-        bool incomplete;
-        std::optional<std::uint64_t> microusd;
-    };
-    for (const auto& item : {
-            Cost_case{0,            false, false, 0},
-            Cost_case{20000,        false, false, 2},
-            Cost_case{25000,        false, false, std::nullopt},
-            Cost_case{std::nullopt, false, false, std::nullopt},
-            Cost_case{20000,        true,  false, std::nullopt},
-            Cost_case{20000,        false, true,  std::nullopt}})
-    {
-        std::istringstream input(usage(20, item.partial, item.incomplete, item.ticks));
-        std::size_t count = 0;
-        const auto inspect_record = [
-                &count,
-                &item,
-                &failure
-            ](
-                const auto& record)
-            {
-                ++count;
-                check(record.usage.cost_microusd.applicable == item.microusd.has_value() &&
-                    record.usage.cost_microusd.value == item.microusd, "only complete exact costs are applicable");
-                check(addon::decode_usage_record(addon::encode_usage_record(record.usage, 2), &failure, 2).has_value(),
-                    "every native cost state remains accepted by the host codec");
-                return true;
-            };
-        check(grok::read_session_usage(input, session / "usage.json", inspect_record,
-            [] { return false; }, &error) && count == 1, "native cost fixture emits one turn");
-    }
 
     write(session / "summary.json", summary("fork", true));
     check(!grok::scan_usage(request, profile, storage, [] { return false; }, &error) &&
@@ -146,10 +104,9 @@ void exercise(const fs::path& root)
     check(prior && prior->records.front().total_tokens == 25, "fork failure leaves accepted immutable snapshot readable");
 
     write(session / "summary.json", summary());
-    write(session / "usage.json", usage(30, true, true));
+    write(session / "usage.json", usage(30, true));
     const auto partial = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
-    check(partial && partial->incomplete_historical_coverage && !partial->records.front().cost_microusd.value,
-        "incomplete or partial cost is never reported as a complete price");
+    check(partial && partial->incomplete_historical_coverage, "incomplete native usage retains its coverage");
     fs::remove(session / "usage.json");
     const auto retained = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(retained && retained->records.front().total_tokens == 35 && retained->incomplete_historical_coverage,
@@ -234,7 +191,7 @@ void interrupted_refresh(const fs::path& root)
     const auto second_session = profile / "sessions" / "cwd" / "session-b";
     fs::create_directory(second_session);
     write(second_session / "summary.json", summary({}, false, "session-b"));
-    write(second_session / "usage.json", usage(50, false, false, 20000, "session-b"));
+    write(second_session / "usage.json", usage(50, false, "session-b"));
     write(session / "usage.json", usage(300));
     grok::Usage_scan_limits limits;
     limits.candidate_records = 1;
@@ -318,10 +275,10 @@ void temporal_contract(const fs::path& root)
         row.set("cachedReadTokens", addon::Json_value(0));
         row.set("cacheCreationTokens", addon::Json_value(0));
         row.set("usageIsIncomplete", addon::Json_value(index == 1));
-        row.set("costUsdTicks", addon::Json_value(index == 1 ? 25000 : 20000));
         turns.push_back(std::move(row));
     }
     document.set("turns", std::move(turns));
+    document.find("turns")->as_array().front().set("costUsdTicks", addon::Json_value(20000));
     write(session / "usage.json", addon::serialize_json(document));
     addon::Usage_scan_request request;
     request.context.account_context = addon::Account_context{2, "fixture", addon::path_to_utf8(profile)};
@@ -333,13 +290,58 @@ void temporal_contract(const fs::path& root)
     const auto candidate = storage / "selected";
     fs::create_directory(candidate);
     request.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(candidate)};
-    const auto page = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
+    auto page = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(page && page->records.size() == 4 && page->cache_candidate, error.c_str());
     addon::Contract_failure failure;
     check(addon::validate_usage_cache_candidate(*page->cache_candidate, addon::path_to_utf8(storage),
         request.context.account_context, [] { return false; }, &failure).has_value(), "temporal candidate is durably sealed");
     check(addon::decode_usage_scan_result(addon::encode_usage_scan_result(*page, 3), &failure, 3).has_value(),
         "temporal native page satisfies the unchanged accounting codec");
+
+    // An existing cache can contain the retired field before dated evidence was recorded.
+    const auto historical_records = [](const std::string& bytes) {
+        std::istringstream input(bytes);
+        std::string line, output;
+        while (std::getline(input, line)) {
+            auto value = *addon::parse_json(line, {}, nullptr);
+            auto* usage = value.find("usage");
+            if (usage && usage->find("record_id")->as_string() == "grok:session-a:1") {
+                auto amount = addon::Json_value::object();
+                amount.set("applicable", addon::Json_value(true));
+                amount.set("value", addon::Json_value(2));
+                usage->set("cost_microusd", amount);
+            }
+            output += addon::serialize_json(value) + '\n';
+        }
+        return output;
+    };
+    const auto historical_root = addon::path_from_utf8(page->cache_candidate->root);
+    auto inventory = read(historical_root / "cache-inventory");
+    inventory.resize(inventory.find('\n') + 1);
+    unsigned cache_count = 0;
+    for (const auto& entry : fs::directory_iterator(historical_root)) {
+        if (entry.path().extension() != ".cache") {
+            continue;
+        }
+        const auto bytes = historical_records(read(entry.path()));
+        write(entry.path(), bytes);
+        inventory += entry.path().stem().string() + ':' + addon::to_hex(addon::Sha256::digest(bytes)) + '\n';
+        ++cache_count;
+    }
+    write(historical_root / "records", historical_records(read(historical_root / "records")));
+    write(historical_root / "cache-inventory", inventory + "end:" + std::to_string(cache_count) + ':' +
+        addon::to_hex(addon::Sha256::digest(inventory)) + '\n');
+    for (const auto* name : {"usage-temporal", "usage-temporal-index", "cache-manifest.json"}) {
+        check(fs::remove(historical_root / name), "fixture removes only its own dated evidence and seal");
+    }
+    const auto historical = addon::seal_usage_cache_candidate(page->cache_candidate->root, addon::path_to_utf8(storage),
+        request.context.account_context, page->snapshot_id, "grok-turn-cache@1", [] { return false; }, &failure);
+    check(historical.has_value(), "historical token cache has a valid complete seal");
+    fs::create_directory(storage / "historical-successor");
+    request.cache_selection = addon::Usage_cache_selection{historical, addon::path_to_utf8(storage / "historical-successor")};
+    page = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
+    check(page && page->records.size() == 4 && page->cache_candidate, error.c_str());
+
     for (unsigned index = 0; index < totals.size(); ++index) {
         const auto& row = page->records[index];
         check(row.record_id == "grok:session-a:" + std::to_string(index + 1) && row.total_tokens == totals[index] &&
@@ -365,9 +367,9 @@ void temporal_contract(const fs::path& root)
                 "original time-zone-free accounting is not converted into an instant");
         }
     }
-    check(page->records[1].input.coverage->covered_records == 0 && !page->records[1].cost_microusd.value &&
+    check(page->records[1].input.coverage->covered_records == 0 &&
         page->records[1].temporal->portions.front().total_tokens == 7,
-        "incomplete categories and unknown exact price preserve the separately proved full turn total");
+        "incomplete categories preserve the separately proved full turn total");
     auto conflicting = document;
     auto conflicting_turns = *conflicting.find("turns");
     conflicting_turns.as_array().front().set("endedAt", addon::Json_value("2026-09-14T01:45:00.123456789-02:30"));

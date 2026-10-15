@@ -102,16 +102,14 @@ Usage reads `sessions/<cwd>/<session>/usage.json` with its `summary.json`.
 Persisted turns already contain deltas, including folded subagent spend. The
 scanner counts each top-level turn once, preserves category values and retains
 cached history when source files disappear. Reasoning and cache subsets are
-not added again to the native input-plus-output total. Missing, partial, or
-incomplete costs remain unknown. Grok's 1e10 ticks per USD are converted only
-when exactly representable as whole microUSD; fractional microUSD remain unknown.
+not added again to the native input-plus-output total.
 
 The independently negotiated `usage-temporal@1` capability supplies dated activity
 on host-selected `usage-scan@3` pages. Each admitted top-level turn can carry its
 exact native total at the original strict RFC3339 `endedAt` instant, retaining
 offset and fractional precision. A timestamp without a timezone remains usable
 for accounting and supplies no instant. Zero totals have no positive portion;
-incomplete categories and unknown prices do not change the turn's proved total.
+incomplete categories do not change the turn's proved total.
 The established accounting dates, IDs and cumulative replay semantics remain
 unchanged. `usage-scan@2` publishes its original accounting without dated evidence.
 

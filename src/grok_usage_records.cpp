@@ -233,20 +233,6 @@ bool read_session_usage(std::istream& input, const fs::path& path,
             return fail("usage_category_invalid");
         if (*record.usage.input.value > k_max_exact_count - *record.usage.output.value ||
             *record.usage.input.value + *record.usage.output.value != *total) return fail("usage_total_mismatch");
-        const auto& cost = member(row, "costUsdTicks");
-        const auto& partial = member(row, "costIsPartial");
-        if (!partial.is_null() && !partial.is_boolean()) return fail("usage_cost_invalid");
-        if (!cost.is_null()) {
-            if (!cost.is_integer() || cost.as_integer() < 0) return fail("usage_cost_invalid");
-            if (covered && (partial.is_null() || !partial.as_boolean())) {
-                const auto ticks = static_cast<std::uint64_t>(cost.as_integer());
-                // The host accepts exact whole microUSD, not rounded tick prices.
-                if (ticks % 10000 == 0) {
-                    record.usage.cost_microusd.applicable = true;
-                    record.usage.cost_microusd.value = ticks / 10000;
-                }
-            }
-        }
         const auto model = text(row, "primaryModelId");
         if (!model.empty()) record.usage.model = model;
         record.recorded_cwd = cwd;

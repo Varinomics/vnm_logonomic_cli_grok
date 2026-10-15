@@ -442,10 +442,16 @@ std::string encode_record(const Session_usage_record& record)
 
 Session_usage_record decode_record(std::string_view line)
 {
-    const auto value = addon::parse_json(line, {}, nullptr);
+    auto value = addon::parse_json(line, {}, nullptr);
     require(value && value->is_object(), "usage_cache_invalid");
+    auto* usage = value->find("usage");
+    require(usage && usage->is_object(), "usage_cache_invalid");
+    // Discard the retired field before SDK decoding so retained token evidence is SDK-independent.
+    auto unavailable = addon::Json_value::object();
+    unavailable.set("applicable", addon::Json_value(false));
+    usage->set("cost_microusd", std::move(unavailable));
     addon::Contract_failure failure;
-    auto record = addon::decode_usage_record(member(*value, "usage"), &failure, 2);
+    auto record = addon::decode_usage_record(*usage, &failure, 2);
     require(record.has_value(), "usage_cache_invalid");
     return {std::move(*record), string_member(*value, "recorded_cwd")};
 }
@@ -905,7 +911,7 @@ Native_times matching_native_times(const fs::path& cache_path,
     std::size_t bytes = 0;
     std::string line;
     const bool parsed = read_session_usage(native, source, [&](const Session_usage_record& record) {
-        if (!read_line(cached, &line) || accounting_digest(line) != accounting_digest(encode_record(record))) return false;
+        if (!read_line(cached, &line) || encode_record(decode_record(line)) != encode_record(record)) return false;
         if (record.usage.total_tokens != 0 && !times.capacity) {
             const auto size = record.usage.record_id.size() + record.instant.value_or("").size();
             if (size > k_sort_bytes - std::min(bytes, k_sort_bytes)) {
@@ -1182,21 +1188,27 @@ void write_temporal_sidecar(const fs::path& root, const fs::path& sorted,
     const std::optional<addon::Account_context>& account, const std::string& snapshot_id,
     Temporal_budget& budget, const std::function<bool()>& cancelled)
 {
-    std::ifstream prior;
+    std::ifstream prior, prior_records;
     std::string prior_line;
+    std::string prior_record_digest;
     std::optional<Temporal_row> prior_row;
     const auto next_prior = [&] {
         prior_row.reset();
+        prior_record_digest.clear();
         if (prior && read_line(prior, &prior_line)) {
             const auto value = addon::parse_json(prior_line, {}, nullptr);
             if (value && value->find("end")) return;
             prior_row = decode_temporal_row(prior_line);
+            std::string accounting;
+            require(read_line(prior_records, &accounting), "usage_temporal_unavailable");
+            prior_record_digest = accounting_digest(encode_record(decode_record(accounting)));
         }
     };
     if (accepted) {
         const auto source = cache_io_path(addon::path_from_utf8(accepted->root));
         if (valid_temporal_sidecar(source, account, accepted->snapshot_id, cancelled)) {
             prior.open(source / k_temporal_file, std::ios::binary);
+            prior_records.open(source / "records", std::ios::binary);
             require(read_line(prior, &prior_line), "usage_temporal_unavailable");
             next_prior();
         }
@@ -1229,7 +1241,7 @@ void write_temporal_sidecar(const fs::path& root, const fs::path& sorted,
             row.accounting_digest == accounting_digest(accounting), "usage_temporal_unavailable");
         while (prior_row && id_less(prior_row->id, row.id)) next_prior();
         if (prior_row && prior_row->id == row.id && prior_row->total == row.total &&
-            prior_row->cache_digest == row.cache_digest)
+            (prior_row->cache_digest == row.cache_digest || prior_record_digest == row.accounting_digest))
         {
             if (row.reason == "missing-evidence") {
                 row.instant = prior_row->instant;
