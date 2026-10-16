@@ -1,5 +1,5 @@
 #pragma once
-#include <logonomic_cli_addon/probe_exchange.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/launcher_discovery.h>
 #include <optional>
 #include <string>
@@ -16,7 +16,7 @@ struct Launcher_command
 };
 std::optional<logonomic::cli_addon::Probe_output> run_probe(const std::vector<std::string>& argv,
     const Environment& environment, std::string_view working_directory, int timeout_ms,
-    logonomic::cli_addon::Invocation_context& context, logonomic::cli_addon::Probe_exchange* exchange = nullptr);
+    logonomic::cli_addon::Invocation_context& context);
 std::vector<std::string> literal_launcher_argv(std::string_view script);
 std::optional<Launcher_command> recognize_launcher(std::string_view script);
 std::optional<Environment> launcher_environment(const Launcher_command& command,

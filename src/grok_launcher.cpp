@@ -18,10 +18,9 @@ using addon::base_name;
 
 std::optional<addon::Probe_output> run_probe(const std::vector<std::string>& argv,
     const Environment& environment, std::string_view working_directory, int timeout_ms,
-    addon::Invocation_context& context, addon::Probe_exchange* exchange)
+    addon::Invocation_context& context)
 {
-    return addon::probe_exchange(argv, environment, working_directory, timeout_ms, context,
-        exchange, "\\\\.\\pipe\\logonomic-grok-probe-");
+    return addon::probe(argv, environment, working_directory, timeout_ms, context);
 }
 
 std::vector<std::string> literal_launcher_argv(std::string_view script)

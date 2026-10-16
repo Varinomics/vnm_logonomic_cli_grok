@@ -446,10 +446,6 @@ Session_usage_record decode_record(std::string_view line)
     require(value && value->is_object(), "usage_cache_invalid");
     auto* usage = value->find("usage");
     require(usage && usage->is_object(), "usage_cache_invalid");
-    // Discard the retired field before SDK decoding so retained token evidence is SDK-independent.
-    auto unavailable = addon::Json_value::object();
-    unavailable.set("applicable", addon::Json_value(false));
-    usage->set("cost_microusd", std::move(unavailable));
     addon::Contract_failure failure;
     auto record = addon::decode_usage_record(*usage, &failure, 2);
     require(record.has_value(), "usage_cache_invalid");
