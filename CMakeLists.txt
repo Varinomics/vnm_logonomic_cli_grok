@@ -98,6 +98,7 @@ logonomic_cli_addon_package_platform(GROK_PLATFORM)
 set(GROK_EXECUTABLE_SUFFIX "${CMAKE_EXECUTABLE_SUFFIX}")
 logonomic_cli_addon_package_directory(logonomic.cli.grok GROK_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
+logonomic_cli_addon_package_indexer(package_index_command package_index_dependencies)
 file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/package/assets/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
@@ -124,13 +125,14 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_launch_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_launch_bridge${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_session_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_session_bridge${GROK_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_quota_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_quota_bridge${GROK_EXECUTABLE_SUFFIX}"
-    COMMAND "$<TARGET_FILE:logonomic_cli_addon_index>" "${GROK_PACKAGE_DIRECTORY}"
+    COMMAND ${package_index_command} "${GROK_PACKAGE_DIRECTORY}"
         --third-party "assets/grok.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
         --third-party "assets/grok-dark.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
     DEPENDS grok_adapter grok_helper grok_launch_bridge grok_session_bridge grok_quota_bridge logonomic_cli_addon_index
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
+        ${package_files} ${package_index_dependencies}
     VERBATIM)
 add_custom_target(grok_package ALL DEPENDS "${GROK_PACKAGE_DIRECTORY}/package.files.json")
 logonomic_cli_addon_install_package("${GROK_PACKAGE_DIRECTORY}" logonomic.cli.grok TARGET grok_package)
