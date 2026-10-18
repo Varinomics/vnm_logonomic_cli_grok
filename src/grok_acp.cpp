@@ -1,5 +1,6 @@
 #include "grok_acp.h"
 #include "grok_json.h"
+#include <logonomic_cli_addon/limits.h>
 #include <algorithm>
 #include <limits>
 namespace grok {
@@ -110,7 +111,7 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
         for (const auto& action : server.actions) actions.push_back(Json(action));
         expected.push_back(object({{"name", Json(name)}, {"actions", std::move(actions)}}));
     }
-    return addon::serialize_json(object({{"stage", Json(1)}, {"pending", Json("")},
+    return addon::serialize_json(object({{"stage", Json(1)}, {"pending_base64", Json("")},
         {"prompt", Json(request.prompt)}, {"session", Json("")}, {"output", Json("")},
         {"new", object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}})},
         {"servers", std::move(expected)}, {"catalog_dirty", Json(false)},
@@ -118,12 +119,17 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
 }
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
-    auto state = parse(inspection.protocol_state);
-    if (!state || !exact_keys(*state, {"stage", "pending", "prompt", "session", "output", "new", "servers",
+    // Encoded pending bytes can exceed a native JSON string's limit while
+    // remaining inside the host's exchange continuation bound.
+    addon::Json_parse_limits state_limits;
+    state_limits.max_bytes = 3 * addon::limits::k_max_exchange_protocol_state_code_units;
+    state_limits.max_string_bytes = state_limits.max_bytes;
+    auto state = addon::parse_json(inspection.protocol_state, state_limits, nullptr);
+    if (!state || !exact_keys(*state, {"stage", "pending_base64", "prompt", "session", "output", "new", "servers",
             "catalog_dirty", "catalog_admitted", "catalog_id", "rejected"}) ||
         !member(*state, "stage").is_integer() || !member(*state, "catalog_dirty").is_boolean() || !member(*state, "servers").is_array() ||
         !member(*state, "new").is_object() || !member(*state, "rejected").is_boolean()) return failure("malformed_acp_state");
-    for (const auto key : {"pending", "prompt", "session", "output"})
+    for (const auto key : {"pending_base64", "prompt", "session", "output"})
         if (!member(*state, key).is_string()) return failure("malformed_acp_state");
     if (!member(*state, "catalog_admitted").is_boolean() ||
         !member(*state, "catalog_id").is_integer()      ||
@@ -133,7 +139,11 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         return failure("malformed_acp_state");
     }
     auto catalog_id = (int)member(*state, "catalog_id").as_integer();
-    auto pending = text(*state, "pending") + inspection.stdout_bytes;
+    auto retained = addon::decode_base64(text(*state, "pending_base64"));
+    if (!retained) return failure("malformed_acp_state");
+    // Only a complete newline-delimited record is required to be valid UTF-8.
+    auto pending = std::move(*retained);
+    pending += inspection.stdout_bytes;
     auto output = text(*state, "output");
     auto stage = member(*state, "stage").as_integer();
     std::string input;
@@ -256,7 +266,7 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     }
     state->set("catalog_id", Json(catalog_id));
     state->set("stage", Json(stage));
-    state->set("pending", Json(std::move(pending)));
+    state->set("pending_base64", Json(addon::encode_base64(pending)));
     state->set("output", Json(std::move(output)));
     addon::Structured_inspect_result result;
     result.protocol_state = addon::serialize_json(*state);

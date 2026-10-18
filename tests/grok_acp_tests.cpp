@@ -17,6 +17,60 @@ Json catalog(Json servers)
     return object({{"result", object({{"servers", std::move(servers)}, {"sessionMcpResolved", Json(false)}})}});
 }
 namespace {
+void utf8_read_boundaries(const std::string& initial)
+{
+    // JSON records are UTF-8, but native stdout reads can stop at any byte.
+    const auto record = reply(1, object({{"protocolVersion", Json(1)},
+        {"agentInfo", object({{"name", Json("Grok café 日本 🌍")}})}}));
+    addon::Structured_inspection inspection;
+    inspection.protocol_state = initial;
+    inspection.stdout_bytes = record;
+    const auto whole = inspect_acp(inspection);
+    require(!whole.complete && !whole.failure_reason, "complete UTF-8 reply failed");
+    for (std::size_t split = 1; split < record.size(); ++split) {
+        inspection.protocol_state = initial;
+        inspection.stdout_bytes = record.substr(0, split);
+        const auto partial = inspect_acp(inspection);
+        if (partial.complete || partial.failure_reason || partial.stdin_bytes) {
+            throw std::runtime_error("partial record at byte " + std::to_string(split) +
+                " advanced or failed the exchange: " + partial.failure_reason.value_or("unexpected progress"));
+        }
+        require(addon::exchange_protocol_state_valid(partial.protocol_state),
+            "a split UTF-8 read produced an invalid host continuation");
+        inspection.protocol_state = partial.protocol_state;
+        inspection.stdout_bytes = record.substr(split);
+        const auto resumed = inspect_acp(inspection);
+        require(resumed.complete == whole.complete && resumed.failure_reason == whole.failure_reason &&
+            resumed.stdin_bytes == whole.stdin_bytes && resumed.protocol_state == whole.protocol_state,
+            "split UTF-8 record changed the exchange outcome");
+    }
+    inspection.protocol_state = initial;
+    for (const char byte : record) {
+        inspection.stdout_bytes.assign(1, byte);
+        const auto result = inspect_acp(inspection);
+        require(!result.complete && !result.failure_reason, "byte-at-a-time UTF-8 reads failed");
+        inspection.protocol_state = result.protocol_state;
+    }
+    require(inspection.protocol_state == whole.protocol_state, "byte-at-a-time reads changed the exchange state");
+
+    inspection.protocol_state = initial;
+    inspection.stdout_bytes = std::string(1024 * 1024, 'x');
+    const auto bounded = inspect_acp(inspection);
+    require(!bounded.complete && !bounded.failure_reason, "pending record byte limit was reduced");
+    inspection.protocol_state = bounded.protocol_state;
+    inspection.stdout_bytes.clear();
+    require(!inspect_acp(inspection).failure_reason, "maximum pending record failed to round-trip");
+    inspection.stdout_bytes = "x";
+    require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_record_limit"),
+        "pending record byte limit was not enforced");
+    auto state = parse(initial);
+    state->set("pending_base64", Json("invalid!"));
+    inspection.protocol_state = addon::serialize_json(*state);
+    inspection.stdout_bytes.clear();
+    require(inspect_acp(inspection).failure_reason == std::optional<std::string>("malformed_acp_state"),
+        "malformed pending bytes were accepted");
+}
+
 int require_catalog_refresh(const addon::Structured_inspect_result& result)
 {
     require(!result.complete && !result.failure_reason && result.stdin_bytes.has_value(),
@@ -170,6 +224,7 @@ int main()
         request.control.servers.push_back({"control", "/task-control", {"complete"}, {{"BOUND_CONTEXT", "opaque"}}});
         addon::Structured_inspection inspection;
         inspection.protocol_state = acp_initial_state(request);
+        utf8_read_boundaries(inspection.protocol_state);
         inspection.stdout_bytes = reply(1, object({{"protocolVersion", Json(1)}}));
         auto result = inspect_acp(inspection);
         require(result.stdin_bytes && result.stdin_bytes->find("session/new") != std::string::npos, "new session not sequenced after initialize");
