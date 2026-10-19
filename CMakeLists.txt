@@ -96,46 +96,15 @@ endif()
 
 logonomic_cli_addon_package_platform(GROK_PLATFORM)
 set(GROK_EXECUTABLE_SUFFIX "${CMAKE_EXECUTABLE_SUFFIX}")
-logonomic_cli_addon_package_directory(logonomic.cli.grok GROK_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
-logonomic_cli_addon_package_indexer(package_index_command package_index_dependencies)
-file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/assets/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/notices/*")
-# Directory membership is an input too: removing a resource, or adding one
-# with an older timestamp, must rebuild the indexed package. file(GENERATE)
-# changes this file only when membership changes, preserving no-op builds.
-file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
-    CONTENT "${package_files}\n")
-add_custom_command(
-    OUTPUT "${GROK_PACKAGE_DIRECTORY}/package.files.json"
-    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${GROK_PACKAGE_DIRECTORY}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory
-        "${GROK_PACKAGE_DIRECTORY}/adapter" "${GROK_PACKAGE_DIRECTORY}/helpers"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/assets" "${GROK_PACKAGE_DIRECTORY}/assets"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities" "${GROK_PACKAGE_DIRECTORY}/capabilities"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance" "${GROK_PACKAGE_DIRECTORY}/provenance"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/package/notices" "${GROK_PACKAGE_DIRECTORY}/notices"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${GROK_PACKAGE_DIRECTORY}/logonomic-cli-addon.json"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_adapter>" "${GROK_PACKAGE_DIRECTORY}/adapter/grok_adapter${GROK_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_helper>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_helper${GROK_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_launch_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_launch_bridge${GROK_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_session_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_session_bridge${GROK_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:grok_quota_bridge>" "${GROK_PACKAGE_DIRECTORY}/helpers/grok_quota_bridge${GROK_EXECUTABLE_SUFFIX}"
-    COMMAND ${package_index_command} "${GROK_PACKAGE_DIRECTORY}"
+logonomic_cli_addon_add_package(grok_package logonomic.cli.grok GROK_PACKAGE_DIRECTORY
+    ADAPTER grok_adapter
+    HELPERS grok_helper grok_launch_bridge grok_session_bridge grok_quota_bridge
+    INDEX_ARGUMENTS
         --third-party "assets/grok.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
         --third-party "assets/grok-dark.svg" "notices/lobe_icons_mit.txt"
-            "provenance/lobe_icons.json"
-    DEPENDS grok_adapter grok_helper grok_launch_bridge grok_session_bridge grok_quota_bridge logonomic_cli_addon_index
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
-        ${package_files} ${package_index_dependencies}
-    VERBATIM)
-add_custom_target(grok_package ALL DEPENDS "${GROK_PACKAGE_DIRECTORY}/package.files.json")
-logonomic_cli_addon_install_package("${GROK_PACKAGE_DIRECTORY}" logonomic.cli.grok TARGET grok_package)
+            "provenance/lobe_icons.json")
 
 # The tests belong to the package's own build. A build that embeds the package
 # stages it and runs tests of its own, so nothing below is added there.
