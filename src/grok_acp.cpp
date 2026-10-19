@@ -2,6 +2,8 @@
 #include "grok_json.h"
 #include <algorithm>
 #include <limits>
+namespace json_util = logonomic::cli_addon::json;
+
 namespace grok {
 namespace addon = logonomic::cli_addon;
 namespace {
@@ -9,7 +11,7 @@ constexpr std::size_t k_record_limit = 1024 * 1024;
 constexpr std::size_t k_result_limit = 1024 * 1024;
 std::string rpc(int id, const char* method, Json params)
 {
-    return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", Json(id)},
+    return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json(id)},
         {"method", Json(method)}, {"params", std::move(params)}})) + '\n';
 }
 addon::Structured_inspect_result failure(const char* reason)
@@ -21,20 +23,20 @@ addon::Structured_inspect_result failure(const char* reason)
 }
 bool response(const Json& value, int id)
 {
-    return text(value, "jsonrpc") == "2.0" && member(value, "id").is_integer() &&
-        member(value, "id").as_integer() == id && member(value, "result").is_object() && !value.find("error");
+    return json_util::text(value, "jsonrpc") == "2.0" && json_util::member(value, "id").is_integer() &&
+        json_util::member(value, "id").as_integer() == id && json_util::member(value, "result").is_object() && !value.find("error");
 }
 // A request whose `toolCall` invokes one of the task's own Task tools: Grok
 // asks with rawInput {variant: "UseTool", tool_name: "<server>__<action>"}
 // and the same title.
 bool task_tool_request(const Json& tool_call, const Json& expected)
 {
-    const auto& input = member(tool_call, "rawInput");
-    const auto name   = text(input, "tool_name");
-    if (text(input, "variant") != "UseTool" || name.empty() || text(tool_call, "title") != name) return false;
+    const auto& input = json_util::member(tool_call, "rawInput");
+    const auto name   = json_util::text(input, "tool_name");
+    if (json_util::text(input, "variant") != "UseTool" || name.empty() || json_util::text(tool_call, "title") != name) return false;
     for (const auto& server : expected.as_array()) {
-        for (const auto& action : member(server, "actions").as_array()) {
-            if (name == text(server, "name") + "__" + action.as_string()) return true;
+        for (const auto& action : json_util::member(server, "actions").as_array()) {
+            if (name == json_util::text(server, "name") + "__" + action.as_string()) return true;
         }
     }
     return false;
@@ -45,41 +47,41 @@ bool task_tool_request(const Json& tool_call, const Json& expected)
 // Empty when the request is not one Grok writes.
 std::string permission_reply(const Json& request, const Json& state, bool* rejected)
 {
-    const auto& params  = member(request, "params");
-    const auto& options = member(params, "options");
-    if (text(params, "sessionId") != text(state, "session") || !member(params, "toolCall").is_object() ||
+    const auto& params  = json_util::member(request, "params");
+    const auto& options = json_util::member(params, "options");
+    if (json_util::text(params, "sessionId") != json_util::text(state, "session") || !json_util::member(params, "toolCall").is_object() ||
         !options.is_array()) return {};
-    const bool allowed = task_tool_request(member(params, "toolCall"), member(state, "servers"));
+    const bool allowed = task_tool_request(json_util::member(params, "toolCall"), json_util::member(state, "servers"));
     const char* option = allowed ? "allow-once" : "reject-once";
     if (!std::any_of(options.as_array().begin(), options.as_array().end(), [&](const auto& offered) {
-            return text(offered, "optionId") == option &&
-                text(offered, "kind") == (allowed ? "allow_once" : "reject_once");
+            return json_util::text(offered, "optionId") == option &&
+                json_util::text(offered, "kind") == (allowed ? "allow_once" : "reject_once");
         })) return {};
     *rejected = !allowed;
-    return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", member(request, "id")},
-        {"result", object({{"outcome", object({{"outcome", Json("selected")}, {"optionId", Json(option)}})}})}})) + '\n';
+    return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", json_util::member(request, "id")},
+        {"result", json_util::object({{"outcome", json_util::object({{"outcome", Json("selected")}, {"optionId", Json(option)}})}})}})) + '\n';
 }
 bool admitted_servers(const Json& result, const Json& expected)
 {
-    const auto& servers = member(result, "servers");
+    const auto& servers = json_util::member(result, "servers");
     if (!servers.is_array() || !expected.is_array()) return false;
     for (const auto& wanted : expected.as_array()) {
         const Json* found = nullptr;
         for (const auto& server : servers.as_array()) {
-            if (text(server, "name") == text(wanted, "name")) {
+            if (json_util::text(server, "name") == json_util::text(wanted, "name")) {
                 if (found) return false;
                 found = &server;
             }
         }
         if (!found) return false;
-        const auto& session = member(*found, "session");
-        if (member(session, "enabled") != Json(true) || text(session, "status") != "ready" ||
-            member(session, "authRequired") == Json(true) || member(session, "setupRequired") == Json(true)) return false;
-        const auto& tools = member(session, "tools");
+        const auto& session = json_util::member(*found, "session");
+        if (json_util::member(session, "enabled") != Json(true) || json_util::text(session, "status") != "ready" ||
+            json_util::member(session, "authRequired") == Json(true) || json_util::member(session, "setupRequired") == Json(true)) return false;
+        const auto& tools = json_util::member(session, "tools");
         if (!tools.is_array()) return false;
-        for (const auto& action : member(wanted, "actions").as_array()) {
+        for (const auto& action : json_util::member(wanted, "actions").as_array()) {
             if (!std::any_of(tools.as_array().begin(), tools.as_array().end(), [&](const auto& tool) {
-                    return text(tool, "name") == action.as_string() && member(tool, "enabled") != Json(false);
+                    return json_util::text(tool, "name") == action.as_string() && json_util::member(tool, "enabled") != Json(false);
                 })) return false;
         }
     }
@@ -88,8 +90,8 @@ bool admitted_servers(const Json& result, const Json& expected)
 }
 std::string acp_initialize()
 {
-    return rpc(1, "initialize", object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()},
-        {"clientInfo", object({{"name", Json("logonomic-grok")}, {"version", Json("1.0.0")}})}}));
+    return rpc(1, "initialize", json_util::object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()},
+        {"clientInfo", json_util::object({{"name", Json("logonomic-grok")}, {"version", Json("1.0.0")}})}}));
 }
 std::string acp_initial_state(const addon::Delegated_prepare_request& request)
 {
@@ -104,54 +106,54 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
         {
             args.push_back(Json(argument));
         }
-        servers.push_back(object({{"name", Json(name)}, {"command", Json(connection.relay_program)},
+        servers.push_back(json_util::object({{"name", Json(name)}, {"command", Json(connection.relay_program)},
             {"args", std::move(args)}, {"env", Json::array()}}));
         auto actions = Json::array();
         for (const auto& action : server.actions) actions.push_back(Json(action));
-        expected.push_back(object({{"name", Json(name)}, {"actions", std::move(actions)}}));
+        expected.push_back(json_util::object({{"name", Json(name)}, {"actions", std::move(actions)}}));
     }
-    return addon::serialize_json(object({{"stage", Json(1)}, {"pending_base64", Json("")},
+    return addon::serialize_json(json_util::object({{"stage", Json(1)}, {"pending_base64", Json("")},
         {"prompt", Json(request.prompt)}, {"session", Json("")}, {"output", Json("")},
-        {"new", object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}})},
+        {"new", json_util::object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}})},
         {"servers", std::move(expected)}, {"catalog_dirty", Json(false)},
         {"catalog_admitted", Json(false)}, {"catalog_id", Json(3)}, {"rejected", Json(false)}}));
 }
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     auto state = addon::parse_exchange_protocol_state(inspection.protocol_state);
-    if (!state || !exact_keys(*state, {"stage", "pending_base64", "prompt", "session", "output", "new", "servers",
+    if (!state || !json_util::exact_keys(*state, {"stage", "pending_base64", "prompt", "session", "output", "new", "servers",
             "catalog_dirty", "catalog_admitted", "catalog_id", "rejected"}) ||
-        !member(*state, "stage").is_integer() || !member(*state, "catalog_dirty").is_boolean() || !member(*state, "servers").is_array() ||
-        !member(*state, "new").is_object() || !member(*state, "rejected").is_boolean()) return failure("malformed_acp_state");
+        !json_util::member(*state, "stage").is_integer() || !json_util::member(*state, "catalog_dirty").is_boolean() || !json_util::member(*state, "servers").is_array() ||
+        !json_util::member(*state, "new").is_object() || !json_util::member(*state, "rejected").is_boolean()) return failure("malformed_acp_state");
     for (const auto key : {"pending_base64", "prompt", "session", "output"})
-        if (!member(*state, key).is_string()) return failure("malformed_acp_state");
-    if (!member(*state, "catalog_admitted").is_boolean() ||
-        !member(*state, "catalog_id").is_integer()      ||
-        member(*state, "catalog_id").as_integer() < 3  ||
-        member(*state, "catalog_id").as_integer() > std::numeric_limits<int>::max())
+        if (!json_util::member(*state, key).is_string()) return failure("malformed_acp_state");
+    if (!json_util::member(*state, "catalog_admitted").is_boolean() ||
+        !json_util::member(*state, "catalog_id").is_integer()      ||
+        json_util::member(*state, "catalog_id").as_integer() < 3  ||
+        json_util::member(*state, "catalog_id").as_integer() > std::numeric_limits<int>::max())
     {
         return failure("malformed_acp_state");
     }
-    auto catalog_id = (int)member(*state, "catalog_id").as_integer();
-    auto retained = addon::decode_base64(text(*state, "pending_base64"));
+    auto catalog_id = (int)json_util::member(*state, "catalog_id").as_integer();
+    auto retained = addon::decode_base64(json_util::text(*state, "pending_base64"));
     if (!retained) return failure("malformed_acp_state");
     // Only a complete newline-delimited record is required to be valid UTF-8.
     auto pending = std::move(*retained);
     pending += inspection.stdout_bytes;
-    auto output = text(*state, "output");
-    auto stage = member(*state, "stage").as_integer();
+    auto output = json_util::text(*state, "output");
+    auto stage = json_util::member(*state, "stage").as_integer();
     std::string input;
     std::size_t offset = 0;
     for (;;) {
         const auto end = pending.find('\n', offset);
         if (end == std::string::npos) break;
         if (end - offset > k_record_limit || end == offset) return failure("acp_record_limit");
-        const auto value = parse(std::string_view(pending).substr(offset, end - offset));
+        const auto value = json_util::parse(std::string_view(pending).substr(offset, end - offset));
         offset = end + 1;
-        if (!value || text(*value, "jsonrpc") != "2.0") return failure("invalid_acp_record");
+        if (!value || json_util::text(*value, "jsonrpc") != "2.0") return failure("invalid_acp_record");
         if (value->find("method")) {
             if (value->find("id")) {
-                if (text(*value, "method") != "session/request_permission") return failure("unsupported_acp_client_request");
+                if (json_util::text(*value, "method") != "session/request_permission") return failure("unsupported_acp_client_request");
                 bool rejected = false;
                 const auto reply = stage == 4 ? permission_reply(*value, *state, &rejected) : std::string{};
                 if (reply.empty()) return failure("acp_permission_request_unsupported");
@@ -159,15 +161,15 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                 input += reply;
                 continue;
             }
-            const auto method = text(*value, "method");
+            const auto method = json_util::text(*value, "method");
             if (method == "session/update") {
-                const auto& params = member(*value, "params");
-                const auto session = text(*state, "session");
-                if (!session.empty() && text(params, "sessionId") != session) return failure("acp_session_mismatch");
-                const auto& update = member(params, "update");
-                if (text(update, "sessionUpdate") == "agent_message_chunk") {
-                    if (stage != 4 || text(member(update, "content"), "type") != "text") return failure("unexpected_acp_text");
-                    output += text(member(update, "content"), "text");
+                const auto& params = json_util::member(*value, "params");
+                const auto session = json_util::text(*state, "session");
+                if (!session.empty() && json_util::text(params, "sessionId") != session) return failure("acp_session_mismatch");
+                const auto& update = json_util::member(params, "update");
+                if (json_util::text(update, "sessionUpdate") == "agent_message_chunk") {
+                    if (stage != 4 || json_util::text(json_util::member(update, "content"), "type") != "text") return failure("unexpected_acp_text");
+                    output += json_util::text(json_util::member(update, "content"), "text");
                     if (output.size() > k_result_limit) return failure("acp_result_limit");
                 }
             }
@@ -184,44 +186,44 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (stage == 6 || !input.empty() || !response(*value, stage == 3 ? catalog_id : (int)stage)) {
             return failure("out_of_order_acp_response");
         }
-        const auto& result = member(*value, "result");
+        const auto& result = json_util::member(*value, "result");
         if (stage == 1) {
-            if (member(result, "protocolVersion") != Json(1)) return failure("invalid_acp_initialize");
-            input = rpc(2, "session/new", member(*state, "new"));
+            if (json_util::member(result, "protocolVersion") != Json(1)) return failure("invalid_acp_initialize");
+            input = rpc(2, "session/new", json_util::member(*state, "new"));
             state->set("new", Json::object());
             stage = 2;
         }
         else if (stage == 2) {
-            if (!bounded_string(member(result, "sessionId"), 512)) return failure("invalid_acp_session");
-            state->set("session", member(result, "sessionId"));
-            input = rpc(3, "_x.ai/mcp/list", object({{"sessionId", member(*state, "session")}, {"cache", Json(true)}}));
+            if (!json_util::bounded_string(json_util::member(result, "sessionId"), 512)) return failure("invalid_acp_session");
+            state->set("session", json_util::member(result, "sessionId"));
+            input = rpc(3, "_x.ai/mcp/list", json_util::object({{"sessionId", json_util::member(*state, "session")}, {"cache", Json(true)}}));
             stage = 3;
         }
         else
         if (stage == 3) {
             // Grok nests the catalog: {"result": {"servers": [...], "sessionMcpResolved": ...}}.
-            const auto& catalog = member(result, "result");
-            if (!member(catalog, "servers").is_array()) {
+            const auto& catalog = json_util::member(result, "result");
+            if (!json_util::member(catalog, "servers").is_array()) {
                 return failure("invalid_mcp_catalog");
             }
             // Consume the reply before processing further frames. Admission waits
             // for trailing invalidations, including an incomplete trailing frame.
-            state->set("catalog_admitted", Json(admitted_servers(catalog, member(*state, "servers"))));
+            state->set("catalog_admitted", Json(admitted_servers(catalog, json_util::member(*state, "servers"))));
             stage = 6;
         }
         else if (stage == 4) {
             // Grok cancels the turn when a tool's permission is rejected.
-            if (text(result, "stopReason") == "cancelled" && member(*state, "rejected") == Json(true) &&
-                text(member(result, "_meta"), "cancellationCategory") == "PermissionRejected")
+            if (json_util::text(result, "stopReason") == "cancelled" && json_util::member(*state, "rejected") == Json(true) &&
+                json_util::text(json_util::member(result, "_meta"), "cancellationCategory") == "PermissionRejected")
             {
                 return failure("tool_permission_denied");
             }
-            if (text(result, "stopReason") != "end_turn" || output.empty()) return failure("acp_completion_failed");
-            input = rpc(5, "session/close", object({{"sessionId", member(*state, "session")}}));
+            if (json_util::text(result, "stopReason") != "end_turn" || output.empty()) return failure("acp_completion_failed");
+            input = rpc(5, "session/close", json_util::object({{"sessionId", json_util::member(*state, "session")}}));
             stage = 5;
         }
         else if (stage == 5) {
-            const auto outcome = text(member(result, "_meta"), "x.ai/closeOutcome");
+            const auto outcome = json_util::text(json_util::member(result, "_meta"), "x.ai/closeOutcome");
             if (outcome != "closed" || offset != pending.size() ||
                 (inspection.final && (inspection.timed_out || inspection.exit_code != 0))) return failure("acp_close_unconfirmed");
             addon::Structured_inspect_result completed;
@@ -235,7 +237,7 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     if (pending.size() > k_record_limit) return failure("acp_record_limit");
     if (inspection.final) return failure(inspection.timed_out ? "acp_timeout" : "acp_incomplete");
     if (stage == 6 && pending.empty()) {
-        if (member(*state, "catalog_dirty") == Json(true)) {
+        if (json_util::member(*state, "catalog_dirty") == Json(true)) {
             if (catalog_id == std::numeric_limits<int>::max()) {
                 return failure("acp_request_id_limit");
             }
@@ -243,17 +245,17 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             // refresh. The host's absolute operation deadline bounds this wait.
             catalog_id = catalog_id == 3 ? 7 : catalog_id + 1;
             input = rpc(catalog_id, "_x.ai/mcp/list",
-                object({{"sessionId", member(*state, "session")}, {"cache", Json(true)}}));
+                json_util::object({{"sessionId", json_util::member(*state, "session")}, {"cache", Json(true)}}));
             state->set("catalog_dirty", Json(false));
             state->set("catalog_admitted", Json(false));
             stage = 3;
         }
         else
-        if (member(*state, "catalog_admitted") == Json(true)) {
+        if (json_util::member(*state, "catalog_admitted") == Json(true)) {
             auto prompt = Json::array();
-            prompt.push_back(object({{"type", Json("text")}, {"text", member(*state, "prompt")}}));
+            prompt.push_back(json_util::object({{"type", Json("text")}, {"text", json_util::member(*state, "prompt")}}));
             input = rpc(4, "session/prompt",
-                object({{"sessionId", member(*state, "session")}, {"prompt", std::move(prompt)}}));
+                json_util::object({{"sessionId", json_util::member(*state, "session")}, {"prompt", std::move(prompt)}}));
             state->set("prompt", Json(""));
             stage = 4;
         }

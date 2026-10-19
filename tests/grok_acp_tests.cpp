@@ -2,26 +2,28 @@
 #include "grok_json.h"
 #include <iostream>
 #include <stdexcept>
+namespace json_util = logonomic::cli_addon::json;
+
 namespace addon = logonomic::cli_addon;
 using namespace grok;
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 std::string reply(int id, Json result)
 {
-    return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", Json(id)}, {"result", std::move(result)}})) + '\n';
+    return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json(id)}, {"result", std::move(result)}})) + '\n';
 }
 // Oracle: grok 1.0.41 answers `_x.ai/mcp/list` with its catalog nested one
 // level down, as recorded by the scripted delegation gate
 // (`{"result":{"servers":[...],"sessionMcpResolved":false}}`).
 Json catalog(Json servers)
 {
-    return object({{"result", object({{"servers", std::move(servers)}, {"sessionMcpResolved", Json(false)}})}});
+    return json_util::object({{"result", json_util::object({{"servers", std::move(servers)}, {"sessionMcpResolved", Json(false)}})}});
 }
 namespace {
 void utf8_read_boundaries(const std::string& initial)
 {
     // JSON records are UTF-8, but native stdout reads can stop at any byte.
-    const auto record = reply(1, object({{"protocolVersion", Json(1)},
-        {"agentInfo", object({{"name", Json("Grok café 日本 🌍")}})}}));
+    const auto record = reply(1, json_util::object({{"protocolVersion", Json(1)},
+        {"agentInfo", json_util::object({{"name", Json("Grok café 日本 🌍")}})}}));
     addon::Structured_inspection inspection;
     inspection.protocol_state = initial;
     inspection.stdout_bytes = record;
@@ -63,7 +65,7 @@ void utf8_read_boundaries(const std::string& initial)
     inspection.stdout_bytes = "x";
     require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_record_limit"),
         "pending record byte limit was not enforced");
-    auto state = parse(initial);
+    auto state = json_util::parse(initial);
     state->set("pending_base64", Json("invalid!"));
     inspection.protocol_state = addon::serialize_json(*state);
     inspection.stdout_bytes.clear();
@@ -75,24 +77,24 @@ int require_catalog_refresh(const addon::Structured_inspect_result& result)
 {
     require(!result.complete && !result.failure_reason && result.stdin_bytes.has_value(),
         "invalidated catalog did not request a refresh");
-    const auto request = parse(*result.stdin_bytes);
-    require(request && text(*request, "method") == "_x.ai/mcp/list",
+    const auto request = json_util::parse(*result.stdin_bytes);
+    require(request && json_util::text(*request, "method") == "_x.ai/mcp/list",
         "invalidated catalog released the prompt");
-    require(text(member(*request, "params"), "sessionId") == "root-session" &&
-        member(member(*request, "params"), "cache") == Json(true),
+    require(json_util::text(json_util::member(*request, "params"), "sessionId") == "root-session" &&
+        json_util::member(json_util::member(*request, "params"), "cache") == Json(true),
         "refresh changed the native session query semantics");
-    return (int)member(*request, "id").as_integer();
+    return (int)json_util::member(*request, "id").as_integer();
 }
 void require_prompt(const addon::Structured_inspect_result& result, const std::string& expected)
 {
     require(!result.complete && !result.failure_reason && result.stdin_bytes.has_value(),
         "clean catalog did not release the retained prompt");
-    const auto request = parse(*result.stdin_bytes);
-    require(request && text(*request, "method") == "session/prompt",
+    const auto request = json_util::parse(*result.stdin_bytes);
+    require(request && json_util::text(*request, "method") == "session/prompt",
         "clean catalog did not issue the native prompt request");
-    const auto& prompt = member(member(*request, "params"), "prompt");
+    const auto& prompt = json_util::member(json_util::member(*request, "params"), "prompt");
     require(prompt.is_array() && prompt.as_array().size() == 1 &&
-        text(prompt.as_array().front(), "text") == expected,
+        json_util::text(prompt.as_array().front(), "text") == expected,
         "catalog refresh changed the original prompt");
 }
 void catalog_ordering(const std::string& catalog_state, const Json& servers, const std::string& prompt)
@@ -101,14 +103,14 @@ void catalog_ordering(const std::string& catalog_state, const Json& servers, con
     // A prompt requires a clean session snapshot with its required actions.
     const auto ready = catalog(servers);
     for (const auto& rejection : {
-            object({{"enabled", Json(false)}}),
-            object({{"status", Json("connecting")}}),
-            object({{"authRequired", Json(true)}}),
-            object({{"setupRequired", Json(true)}}),
-            object({{"tools", Json::array()}})})
+            json_util::object({{"enabled", Json(false)}}),
+            json_util::object({{"status", Json("connecting")}}),
+            json_util::object({{"authRequired", Json(true)}}),
+            json_util::object({{"setupRequired", Json(true)}}),
+            json_util::object({{"tools", Json::array()}})})
     {
         auto server = servers.as_array().front();
-        auto session = member(server, "session");
+        auto session = json_util::member(server, "session");
         for (const auto& field : rejection.as_object()) {
             session.set(field.name, field.value);
         }
@@ -125,7 +127,7 @@ void catalog_ordering(const std::string& catalog_state, const Json& servers, con
     for (const char* method : {"_x.ai/mcp/server_status", "_x.ai/mcp/tools_changed",
             "_x.ai/mcp/servers_updated", "_x.ai/mcp_initialized"})
     {
-        const auto notification = addon::serialize_json(object({
+        const auto notification = addon::serialize_json(json_util::object({
             {"jsonrpc", Json("2.0")}, {"method", Json(method)}, {"params", Json::object()}})) + '\n';
         for (const bool notification_first : {true, false}) {
             addon::Structured_inspection inspection;
@@ -194,7 +196,7 @@ void catalog_ordering(const std::string& catalog_state, const Json& servers, con
     inspection.protocol_state = catalog_state;
     inspection.stdout_bytes = reply(3, ready) + reply(3, ready);
     require(inspect_acp(inspection).failure_reason.has_value(), "duplicate catalog reply was accepted");
-    inspection.stdout_bytes = reply(3, ready) + reply(4, object({{"stopReason", Json("end_turn")}}));
+    inspection.stdout_bytes = reply(3, ready) + reply(4, json_util::object({{"stopReason", Json("end_turn")}}));
     require(inspect_acp(inspection).failure_reason.has_value(),
         "prompt response was accepted before publishing the prompt");
     inspection.stdout_bytes = reply(3, ready).substr(0, 17);
@@ -225,37 +227,37 @@ int main()
         addon::Structured_inspection inspection;
         inspection.protocol_state = acp_initial_state(request);
         utf8_read_boundaries(inspection.protocol_state);
-        inspection.stdout_bytes = reply(1, object({{"protocolVersion", Json(1)}}));
+        inspection.stdout_bytes = reply(1, json_util::object({{"protocolVersion", Json(1)}}));
         auto result = inspect_acp(inspection);
         require(result.stdin_bytes && result.stdin_bytes->find("session/new") != std::string::npos, "new session not sequenced after initialize");
         require(result.stdin_bytes->find("session/prompt") == std::string::npos, "prompt escaped MCP admission");
-        const auto native_new = parse(*result.stdin_bytes);
+        const auto native_new = json_util::parse(*result.stdin_bytes);
         require(native_new.has_value(), "session/new must remain valid native JSON");
-        const auto& emitted_servers = member(member(*native_new, "params"), "mcpServers");
+        const auto& emitted_servers = json_util::member(json_util::member(*native_new, "params"), "mcpServers");
         require(emitted_servers.is_array() && emitted_servers.as_array().size() == 1,
             "forward exactly the required task server");
         const auto& emitted_server = emitted_servers.as_array().front();
-        const auto& args = member(emitted_server, "args").as_array();
-        require(text(emitted_server, "command") == request.control.connection->relay_program &&
+        const auto& args = json_util::member(emitted_server, "args").as_array();
+        require(json_util::text(emitted_server, "command") == request.control.connection->relay_program &&
             args.size() == 4 && args[0].as_string() == "--descriptor" &&
             args[1].as_string() == request.control.connection->descriptor_path &&
             args[2].as_string() == "--server" && args[3].as_string() == "control",
             "native MCP request preserves exact nonsecret relay arguments");
-        const auto& emitted_env = member(emitted_server, "env");
+        const auto& emitted_env = json_util::member(emitted_server, "env");
         require(emitted_env.is_array() && emitted_env.as_array().empty() &&
             result.stdin_bytes->find("opaque") == std::string::npos &&
             result.protocol_state.find("opaque") == std::string::npos,
             "host authority cannot enter ACP requests or continuation");
         inspection.protocol_state = result.protocol_state;
-        inspection.stdout_bytes = reply(2, object({{"sessionId", Json("root-session")}}));
+        inspection.stdout_bytes = reply(2, json_util::object({{"sessionId", Json("root-session")}}));
         result = inspect_acp(inspection);
         require(result.stdin_bytes && result.stdin_bytes->find("_x.ai/mcp/list") != std::string::npos, "native MCP readiness not queried");
         const auto catalog_state = result.protocol_state;
         auto servers = Json::array();
         auto tools = Json::array();
-        tools.push_back(object({{"name", Json("complete")}, {"enabled", Json(true)}}));
-        servers.push_back(object({{"name", Json("logonomic-task-1-control")},
-            {"session", object({{"enabled", Json(true)}, {"status", Json("ready")}, {"tools", std::move(tools)}})}}));
+        tools.push_back(json_util::object({{"name", Json("complete")}, {"enabled", Json(true)}}));
+        servers.push_back(json_util::object({{"name", Json("logonomic-task-1-control")},
+            {"session", json_util::object({{"enabled", Json(true)}, {"status", Json("ready")}, {"tools", std::move(tools)}})}}));
         catalog_ordering(catalog_state, servers, request.prompt);
         inspection.protocol_state = catalog_state;
         inspection.stdout_bytes = reply(3, catalog(servers));
@@ -272,27 +274,27 @@ int main()
         // category PermissionRejected.
         const auto permission_request = [](const std::string& tool, const std::string& title, bool allow_once) {
             auto options = Json::array();
-            options.push_back(object({{"optionId", Json("always-allow")}, {"name", Json("always allow")}, {"kind", Json("allow_always")}}));
+            options.push_back(json_util::object({{"optionId", Json("always-allow")}, {"name", Json("always allow")}, {"kind", Json("allow_always")}}));
             if (allow_once) {
-                options.push_back(object({{"optionId", Json("allow-once")}, {"name", Json("allow once")}, {"kind", Json("allow_once")}}));
+                options.push_back(json_util::object({{"optionId", Json("allow-once")}, {"name", Json("allow once")}, {"kind", Json("allow_once")}}));
             }
-            options.push_back(object({{"optionId", Json("reject-once")}, {"name", Json("reject once")}, {"kind", Json("reject_once")}}));
-            auto input = object({{"variant", Json("UseTool")}, {"tool_name", Json(tool)}, {"tool_input", Json::object()}});
-            auto call = object({{"toolCallId", Json("call_7d5edeb1")}, {"kind", Json("other")}, {"title", Json(title)},
+            options.push_back(json_util::object({{"optionId", Json("reject-once")}, {"name", Json("reject once")}, {"kind", Json("reject_once")}}));
+            auto input = json_util::object({{"variant", Json("UseTool")}, {"tool_name", Json(tool)}, {"tool_input", Json::object()}});
+            auto call = json_util::object({{"toolCallId", Json("call_7d5edeb1")}, {"kind", Json("other")}, {"title", Json(title)},
                 {"rawInput", std::move(input)}});
-            return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", Json(0)},
+            return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json(0)},
                 {"method", Json("session/request_permission")},
-                {"params", object({{"sessionId", Json("root-session")}, {"toolCall", std::move(call)},
+                {"params", json_util::object({{"sessionId", Json("root-session")}, {"toolCall", std::move(call)},
                     {"options", std::move(options)}})}})) + '\n';
         };
         const auto chosen = [](const addon::Structured_inspect_result& answered) {
             require(!answered.complete && !answered.failure_reason && answered.stdin_bytes.has_value(),
                 "a permission request was not answered");
-            const auto reply = parse(*answered.stdin_bytes);
-            require(reply && member(*reply, "id") == Json(0) &&
-                text(member(member(*reply, "result"), "outcome"), "outcome") == "selected",
+            const auto reply = json_util::parse(*answered.stdin_bytes);
+            require(reply && json_util::member(*reply, "id") == Json(0) &&
+                json_util::text(json_util::member(json_util::member(*reply, "result"), "outcome"), "outcome") == "selected",
                 "the answer names the request and selects one of its options");
-            return text(member(member(*reply, "result"), "outcome"), "optionId");
+            return json_util::text(json_util::member(json_util::member(*reply, "result"), "outcome"), "optionId");
         };
         const std::string task_tool = "logonomic-task-1-control__complete";
         inspection.protocol_state = prompt_state;
@@ -309,18 +311,18 @@ int main()
             const auto answered = inspect_acp(inspection);
             require(chosen(answered) == "reject-once", "anything but the task's own Task tools is left to the launcher");
             inspection.protocol_state = answered.protocol_state;
-            inspection.stdout_bytes = reply(4, object({{"stopReason", Json("cancelled")},
-                {"_meta", object({{"cancellationCategory", Json("PermissionRejected")}})}}));
+            inspection.stdout_bytes = reply(4, json_util::object({{"stopReason", Json("cancelled")},
+                {"_meta", json_util::object({{"cancellationCategory", Json("PermissionRejected")}})}}));
             require(inspect_acp(inspection).failure_reason == std::optional<std::string>("tool_permission_denied"),
                 "a turn Grok ended at a rejected tool fails as that denial");
-            inspection.stdout_bytes = reply(4, object({{"stopReason", Json("cancelled")},
-                {"_meta", object({{"cancellationCategory", Json("UserCancelled")}})}}));
+            inspection.stdout_bytes = reply(4, json_util::object({{"stopReason", Json("cancelled")},
+                {"_meta", json_util::object({{"cancellationCategory", Json("UserCancelled")}})}}));
             require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_completion_failed"),
                 "a cancellation for another cause after a rejection is not a permission denial");
         }
         inspection.protocol_state = prompt_state;
-        inspection.stdout_bytes = reply(4, object({{"stopReason", Json("cancelled")},
-            {"_meta", object({{"cancellationCategory", Json("PermissionRejected")}})}}));
+        inspection.stdout_bytes = reply(4, json_util::object({{"stopReason", Json("cancelled")},
+            {"_meta", json_util::object({{"cancellationCategory", Json("PermissionRejected")}})}}));
         require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_completion_failed"),
             "a cancellation the package did not cause is not a permission denial");
         inspection.protocol_state = prompt_state;
@@ -333,7 +335,7 @@ int main()
             "no permission is answered before the prompt");
         inspection.protocol_state = approved.protocol_state;
         inspection.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"root-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Submitted.\"}}}}\n" +
-            reply(4, object({{"stopReason", Json("end_turn")}}));
+            reply(4, json_util::object({{"stopReason", Json("end_turn")}}));
         const auto after_approval = inspect_acp(inspection);
         require(!after_approval.complete && after_approval.stdin_bytes &&
             after_approval.stdin_bytes->find("session/close") != std::string::npos,
@@ -342,13 +344,13 @@ int main()
         inspection.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"wrong-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"fake\"}}}}\n";
         require(inspect_acp(inspection).failure_reason.has_value(), "foreign session text accepted");
         inspection.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"root-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Done.\"}}}}\n" +
-            reply(4, object({{"stopReason", Json("end_turn")}}));
+            reply(4, json_util::object({{"stopReason", Json("end_turn")}}));
         result = inspect_acp(inspection);
         require(!result.complete && result.stdin_bytes && result.stdin_bytes->find("session/close") != std::string::npos, "completion skipped native close");
         inspection.protocol_state = result.protocol_state;
-        inspection.stdout_bytes = reply(5, object({{"_meta", object({{"x.ai/closeOutcome", Json("superseded")}})}}));
+        inspection.stdout_bytes = reply(5, json_util::object({{"_meta", json_util::object({{"x.ai/closeOutcome", Json("superseded")}})}}));
         require(inspect_acp(inspection).failure_reason.has_value(), "superseded session counted as closed");
-        inspection.stdout_bytes = reply(5, object({{"_meta", object({{"x.ai/closeOutcome", Json("closed")}})}}));
+        inspection.stdout_bytes = reply(5, json_util::object({{"_meta", json_util::object({{"x.ai/closeOutcome", Json("closed")}})}}));
         result = inspect_acp(inspection);
         require(result.complete && result.result_bytes == std::optional<std::string>("Done."), "confirmed completion lost");
         inspection.protocol_state = catalog_state;

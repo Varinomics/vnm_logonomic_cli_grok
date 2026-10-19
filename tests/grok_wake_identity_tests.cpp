@@ -3,6 +3,8 @@
 #include <iostream>
 #include <stdexcept>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 void require(bool condition, const char* message)
 {
@@ -10,7 +12,7 @@ void require(bool condition, const char* message)
 }
 grok::Json event(const std::string& name, const std::string& session)
 {
-    return grok::object({{"hook_event_name", grok::Json(name)}, {"sessionId", grok::Json(session)}});
+    return json_util::object({{"hook_event_name", grok::Json(name)}, {"sessionId", grok::Json(session)}});
 }
 }
 

@@ -7,6 +7,8 @@
 #include <system_error>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace grok {
 namespace addon = logonomic::cli_addon;
 namespace {
@@ -17,7 +19,7 @@ constexpr const char* k_initialize_id = "logonomic-wake-initialize";
 
 std::string rpc(std::string id, const char* method, Json params)
 {
-    return addon::serialize_json(object({
+    return addon::serialize_json(json_util::object({
         {"jsonrpc", Json("2.0")}, {"id", Json(std::move(id))},
         {"method", Json(method)}, {"params", std::move(params)}})) + '\n';
 }
@@ -51,9 +53,9 @@ std::string Wake_protocol::initialize()
 {
     assert(!m_initialization_started);
     m_initialization_started = true;
-    return rpc(k_initialize_id, "initialize", object({
+    return rpc(k_initialize_id, "initialize", json_util::object({
         {"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()},
-        {"clientInfo", object({{"name", Json("logonomic-grok-wake")}, {"version", Json("1.0.0")}})}}));
+        {"clientInfo", json_util::object({{"name", Json("logonomic-grok-wake")}, {"version", Json("1.0.0")}})}}));
 }
 
 std::string Wake_protocol::query_session()
@@ -200,8 +202,8 @@ Wake_exchange Wake_protocol::receive(std::string_view complete_json_line)
     if (complete_json_line.size() > k_record_limit) {
         return fail("native_record_limit");
     }
-    const auto value = parse(complete_json_line);
-    if (!value || text(*value, "jsonrpc") != "2.0") {
+    const auto value = json_util::parse(complete_json_line);
+    if (!value || json_util::text(*value, "jsonrpc") != "2.0") {
         return fail("native_record_invalid");
     }
     if (value->find("method")) {
@@ -210,34 +212,34 @@ Wake_exchange Wake_protocol::receive(std::string_view complete_json_line)
         if (value->find("id")) {
             return {};
         }
-        if (text(*value, "method") != "_x.ai/queue/changed" ||
+        if (json_util::text(*value, "method") != "_x.ai/queue/changed" ||
             !m_pending || !m_pending->write_started)
         {
             return {};
         }
-        const auto& params = member(*value, "params");
-        if (text(params, "sessionId") != m_session_id) {
+        const auto& params = json_util::member(*value, "params");
+        if (json_util::text(params, "sessionId") != m_session_id) {
             return {};
         }
-        bool accepted = text(params, "runningPromptId") == m_pending->notification_id;
-        const auto& entries = member(params, "entries");
+        bool accepted = json_util::text(params, "runningPromptId") == m_pending->notification_id;
+        const auto& entries = json_util::member(params, "entries");
         if (entries.is_array()) {
             accepted |= std::any_of(entries.as_array().begin(), entries.as_array().end(),
-                [&](const Json& entry) { return text(entry, "id") == m_pending->notification_id; });
+                [&](const Json& entry) { return json_util::text(entry, "id") == m_pending->notification_id; });
         }
         return accepted ? finish_notification(Wake_outcome::ACCEPTED, "native_queue_accepted")
                         : Wake_exchange{};
     }
 
-    const auto id      = text(*value, "id");
-    const auto& result = member(*value, "result");
+    const auto id      = json_util::text(*value, "id");
+    const auto& result = json_util::member(*value, "result");
     if (id == k_initialize_id) {
         if (!m_initialization_started || m_initialized || value->find("error") ||
-            member(result, "protocolVersion") != Json(1))
+            json_util::member(result, "protocolVersion") != Json(1))
         {
             return fail("native_initialize_invalid");
         }
-        m_agent_instance_id = text(member(result, "_meta"), "agentInstanceId");
+        m_agent_instance_id = json_util::text(json_util::member(result, "_meta"), "agentInstanceId");
         if (!valid_identity(m_agent_instance_id)) {
             return fail("native_instance_identity_missing");
         }
@@ -246,22 +248,22 @@ Wake_exchange Wake_protocol::receive(std::string_view complete_json_line)
     }
     if (!m_info_request_id.empty() && id == m_info_request_id) {
         m_info_request_id.clear();
-        const auto& sessions = member(member(result, "result"), "sessions");
+        const auto& sessions = json_util::member(json_util::member(result, "result"), "sessions");
         const Json* resident = nullptr;
         bool ambiguous = false;
         if (sessions.is_array()) {
             for (const auto& session : sessions.as_array()) {
-                if (text(session, "sessionId") == m_session_id) {
+                if (json_util::text(session, "sessionId") == m_session_id) {
                     ambiguous |= resident != nullptr;
                     resident = &session;
                 }
             }
         }
         if (value->find("error") || !resident || ambiguous ||
-            member(*resident, "resident") != Json(true) ||
-            text(member(*resident, "origin"), "kind") != "local" ||
-            text(*resident, "activity") == "dormant" || text(*resident, "activity") == "dead" ||
-            !same_directory(m_cwd, text(*resident, "cwd")))
+            json_util::member(*resident, "resident") != Json(true) ||
+            json_util::text(json_util::member(*resident, "origin"), "kind") != "local" ||
+            json_util::text(*resident, "activity") == "dormant" || json_util::text(*resident, "activity") == "dead" ||
+            !same_directory(m_cwd, json_util::text(*resident, "cwd")))
         {
             m_failure_reason = "native_resident_session_unavailable";
             m_ready          = false;
@@ -285,11 +287,11 @@ Wake_exchange Wake_protocol::receive(std::string_view complete_json_line)
         m_prompt_requests.emplace(m_pending->request_id,
             Notification_key{m_session_id, m_pending->notification_id});
         auto prompt = Json::array();
-        prompt.push_back(object({{"type", Json("text")}, {"text", Json(m_pending->prompt)}}));
+        prompt.push_back(json_util::object({{"type", Json("text")}, {"text", Json(m_pending->prompt)}}));
         Wake_exchange exchange;
-        exchange.stdin_bytes = rpc(m_pending->request_id, "session/prompt", object({
+        exchange.stdin_bytes = rpc(m_pending->request_id, "session/prompt", json_util::object({
             {"sessionId", Json(m_session_id)}, {"prompt", std::move(prompt)},
-            {"_meta", object({{"promptId", Json(m_pending->notification_id)}, {"verbatim", Json(true)}})}}));
+            {"_meta", json_util::object({{"promptId", Json(m_pending->notification_id)}, {"verbatim", Json(true)}})}}));
         exchange.writes_prompt = true;
         return exchange;
     }

@@ -1,13 +1,15 @@
 #include "grok_wake_identity.h"
 #include "grok_json.h"
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace grok {
 
 void Wake_session_identity::observe(const Json& event, std::string_view transition_nonce)
 {
-    if (!text(event, "subagentType").empty() || !text(event, "subagentId").empty()) return;
-    const auto name = text(event, "hook_event_name");
-    const auto session = text(event, "sessionId");
+    if (!json_util::text(event, "subagentType").empty() || !json_util::text(event, "subagentId").empty()) return;
+    const auto name = json_util::text(event, "hook_event_name");
+    const auto session = json_util::text(event, "sessionId");
     if (session.empty()) return;
     if (name == "SessionEnd" && session == m_session_id) {
         m_session_id.clear();

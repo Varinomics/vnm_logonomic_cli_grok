@@ -10,6 +10,8 @@
 #include <windows.h>
 #endif
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace grok {
 namespace addon = logonomic::cli_addon;
 namespace {
@@ -88,18 +90,18 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
         for (const auto& line : events.control_lines) send(protocol.receive(line));
         if (events.control_closed) consume_results(protocol.transport_closed("native_control_closed"));
         if (events.request) {
-            const auto envelope = parse(*events.request);
-            const auto operation = envelope ? text(*envelope, "operation") : std::string{};
+            const auto envelope = json_util::parse(*events.request);
+            const auto operation = envelope ? json_util::text(*envelope, "operation") : std::string{};
             const bool notify = operation == "notify";
-            if (envelope && operation == "observe" && text(*envelope, "token") == token) {
+            if (envelope && operation == "observe" && json_util::text(*envelope, "token") == token) {
                 const auto before = identity.session_id();
                 const auto previous_nonce = identity.transition_nonce();
-                identity.observe(member(*envelope, "event"), text(*envelope, "transition_nonce"));
+                identity.observe(json_util::member(*envelope, "event"), json_util::text(*envelope, "transition_nonce"));
                 if (before != identity.session_id() || previous_nonce != identity.transition_nonce()) {
                     send(protocol.forget_session());
                     if (!identity.session_id().empty()) protocol.confirm_session(identity.session_id());
                 }
-                reply(object({{"observed", Json(true)}}));
+                reply(json_util::object({{"observed", Json(true)}}));
             }
             else if (request) {
                 if (notify) reply(addon::encode_session_wake_notify_result(
@@ -112,7 +114,7 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
                 next.deadline = Clock::now() + std::chrono::seconds(4);
                 bool valid = false;
                 if (envelope && notify) {
-                    const auto decoded = addon::decode_session_wake_notify_request(member(*envelope, "payload"), nullptr);
+                    const auto decoded = addon::decode_session_wake_notify_request(json_util::member(*envelope, "payload"), nullptr);
                     if (decoded) {
                         next.target = decoded->target;
                         next.notification_id = decoded->notification_id;
@@ -121,11 +123,11 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
                     }
                 }
                 else if (envelope && operation == "inspect") {
-                    const auto decoded = addon::decode_session_wake_inspect_request(member(*envelope, "payload"), nullptr);
+                    const auto decoded = addon::decode_session_wake_inspect_request(json_util::member(*envelope, "payload"), nullptr);
                     if (decoded) { next.target = decoded->target; valid = true; }
                 }
-                if (!valid || text(next.target.binding, "token") != token ||
-                    text(next.target.binding, "transport") != "grok-private-leader-v1") {
+                if (!valid || json_util::text(next.target.binding, "token") != token ||
+                    json_util::text(next.target.binding, "transport") != "grok-private-leader-v1") {
                     unavailable(notify, "native_launch_binding_unavailable");
                 }
                 else if (identity.transition_nonce().empty() ||
