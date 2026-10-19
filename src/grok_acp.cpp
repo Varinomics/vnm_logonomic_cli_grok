@@ -1,6 +1,5 @@
 #include "grok_acp.h"
 #include "grok_json.h"
-#include <logonomic_cli_addon/limits.h>
 #include <algorithm>
 #include <limits>
 namespace grok {
@@ -119,12 +118,7 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
 }
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
-    // Encoded pending bytes can exceed a native JSON string's limit while
-    // remaining inside the host's exchange continuation bound.
-    addon::Json_parse_limits state_limits;
-    state_limits.max_bytes = 3 * addon::limits::k_max_exchange_protocol_state_code_units;
-    state_limits.max_string_bytes = state_limits.max_bytes;
-    auto state = addon::parse_json(inspection.protocol_state, state_limits, nullptr);
+    auto state = addon::parse_exchange_protocol_state(inspection.protocol_state);
     if (!state || !exact_keys(*state, {"stage", "pending_base64", "prompt", "session", "output", "new", "servers",
             "catalog_dirty", "catalog_admitted", "catalog_id", "rejected"}) ||
         !member(*state, "stage").is_integer() || !member(*state, "catalog_dirty").is_boolean() || !member(*state, "servers").is_array() ||
