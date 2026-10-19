@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <algorithm>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace grok {
 namespace addon = logonomic::cli_addon;
 
@@ -59,7 +61,7 @@ void prepare_wake(addon::Launch_patch& patch, const std::vector<std::string>& ar
         patch.set.emplace_back(k_wake_token_environment, token);
         preparation.available = true;
         preparation.reason.clear();
-        preparation.binding = object({{"transport", Json("grok-private-leader-v1")}, {"token", Json(token)}});
+        preparation.binding = json_util::object({{"transport", Json("grok-private-leader-v1")}, {"token", Json(token)}});
     }
     patch.session_wake = std::move(preparation);
 }
@@ -86,20 +88,20 @@ void handle_wake(addon::Invocation_context& context)
             {addon::Session_wake_disposition::UNAVAILABLE, std::move(reason), std::nullopt}));
         else context.succeed(addon::encode_session_wake_readiness({false, std::move(reason)}));
     };
-    const auto token = text(target->binding, "token");
+    const auto token = json_util::text(target->binding, "token");
     std::error_code path_error;
     const bool same_bridge = !target->launcher_argv.empty() && std::filesystem::equivalent(
         addon::path_from_utf8(target->launcher_argv.front()),
         addon::path_from_utf8(session_bridge_path()), path_error) && !path_error;
-    if (text(target->binding, "transport") != "grok-private-leader-v1" || target->binding.as_object().size() != 2 ||
+    if (json_util::text(target->binding, "transport") != "grok-private-leader-v1" || target->binding.as_object().size() != 2 ||
         token.size() != 32 || token.find_first_not_of("0123456789abcdef") != std::string::npos ||
         target->launcher_argv.size() < 4 || !same_bridge ||
         target->launcher_argv[1] != "--serve" || target->launcher_argv[2] != token) {
         unavailable("native_launch_binding_unavailable"); return;
     }
-    const auto response = exchange_wake_request(token, addon::serialize_json(object({
+    const auto response = exchange_wake_request(token, addon::serialize_json(json_util::object({
         {"operation", Json(context.request().operation)}, {"payload", context.request().payload}})), context);
-    const auto value = response.response ? parse(*response.response) : std::nullopt;
+    const auto value = response.response ? json_util::parse(*response.response) : std::nullopt;
     if (value) {
         if (notify) {
             const auto result = addon::decode_session_wake_notify_result(*value, nullptr);

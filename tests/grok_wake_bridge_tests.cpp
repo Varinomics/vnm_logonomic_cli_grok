@@ -5,6 +5,8 @@
 #include <iostream>
 #include <stdexcept>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace grok {
 int serve(const std::string& token, const std::vector<std::string>& native_argv);
 }
@@ -12,9 +14,6 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
 namespace {
 namespace addon = logonomic::cli_addon;
 using grok::Json;
-using grok::member;
-using grok::object;
-using grok::text;
 
 void require(bool condition, const char* message)
 {
@@ -38,17 +37,17 @@ const std::string k_token(32, 'a');
 
 std::string response(const Json& query, Json result)
 {
-    return addon::serialize_json(object({
-        {"jsonrpc", Json("2.0")}, {"id", member(query, "id")}, {"result", std::move(result)}}));
+    return addon::serialize_json(json_util::object({
+        {"jsonrpc", Json("2.0")}, {"id", json_util::member(query, "id")}, {"result", std::move(result)}}));
 }
 
 std::string roster(const Json& query, const std::string& session)
 {
     auto sessions = Json::array();
-    sessions.push_back(object({{"sessionId", Json(session)}, {"cwd", Json("/work")},
+    sessions.push_back(json_util::object({{"sessionId", Json(session)}, {"cwd", Json("/work")},
         {"resident", Json(true)}, {"activity", Json("idle")},
-        {"origin", object({{"kind", Json("local")}})}}));
-    return response(query, object({{"result", object({{"sessions", std::move(sessions)}})}}));
+        {"origin", json_util::object({{"kind", Json("local")}})}}));
+    return response(query, json_util::object({{"result", json_util::object({{"sessions", std::move(sessions)}})}}));
 }
 
 class Scripted_runtime : public grok::Wake_runtime
@@ -58,10 +57,10 @@ public:
 
     bool write_control(std::string_view bytes) override
     {
-        const auto query = grok::parse(bytes);
+        const auto query = json_util::parse(bytes);
         require(query.has_value(), "bridge wrote invalid native JSON");
         m_query = *query;
-        if (text(m_query, "method") == "session/prompt") {
+        if (json_util::text(m_query, "method") == "session/prompt") {
             ++m_scenario.prompt_count;
         }
         return true;
@@ -69,10 +68,10 @@ public:
 
     void reply(std::string_view bytes) override
     {
-        const auto value = grok::parse(bytes);
+        const auto value = json_util::parse(bytes);
         require(value.has_value(), "bridge replied with invalid JSON");
         m_scenario.replies.push_back(*value);
-        if (text(*value, "reason") == "native_control_timeout") {
+        if (json_util::text(*value, "reason") == "native_control_timeout") {
             m_phase = 6;
         }
     }
@@ -82,15 +81,15 @@ public:
         grok::Wake_poll event;
         switch (m_phase++) {
         case 0:
-            event.control_lines.push_back(response(m_query, object({
-                {"protocolVersion", Json(1)}, {"_meta", object({{"agentInstanceId", Json("leader")}})}})));
+            event.control_lines.push_back(response(m_query, json_util::object({
+                {"protocolVersion", Json(1)}, {"_meta", json_util::object({{"agentInstanceId", Json("leader")}})}})));
             event.request = observation();
             break;
         case 1:
             event.request = host_request(m_scenario.notify);
             break;
         case 2:
-            require(text(m_query, "method") == "_x.ai/sessions/list", "fixture request never reached native inspection");
+            require(json_util::text(m_query, "method") == "_x.ai/sessions/list", "fixture request never reached native inspection");
             if (m_scenario.notify) {
                 event.control_lines.push_back(roster(m_query, m_session));
             }
@@ -132,7 +131,7 @@ public:
         case 9:
             if (!m_scenario.submitted) {
                 require(m_scenario.replies.back().find("available") == nullptr ||
-                    member(m_scenario.replies.back(), "available") != Json(true),
+                    json_util::member(m_scenario.replies.back(), "available") != Json(true),
                     "abandoned roster reply completed the fresh inspection");
                 event.control_lines.push_back(roster(m_fresh_query, m_session));
             }
@@ -147,9 +146,9 @@ public:
 private:
     std::string observation() const
     {
-        return addon::serialize_json(object({
+        return addon::serialize_json(json_util::object({
             {"operation", Json("observe")}, {"token", Json(k_token)}, {"transition_nonce", Json(m_nonce)},
-            {"event", object({{"hook_event_name", Json("SessionStart")}, {"sessionId", Json(m_session)}})}}));
+            {"event", json_util::object({{"hook_event_name", Json("SessionStart")}, {"sessionId", Json(m_session)}})}}));
     }
 
     std::string host_request(bool notify) const
@@ -160,7 +159,7 @@ private:
         target.launcher_argv       = {"bridge", "--serve", k_token, "grok"};
         target.correlation         = {m_nonce};
         target.launch_environment  = {addon::host_platform_id(), Json::object(), std::nullopt};
-        target.binding = object({{"transport", Json("grok-private-leader-v1")}, {"token", Json(k_token)}});
+        target.binding = json_util::object({{"transport", Json("grok-private-leader-v1")}, {"token", Json(k_token)}});
         const auto payload = notify
             ? addon::encode_session_wake_notify_request({target, "mailbox-17", "Read your mailbox."})
             : addon::encode_session_wake_inspect_request({target});
@@ -168,7 +167,7 @@ private:
         require(notify ? addon::decode_session_wake_notify_request(payload, &failure).has_value()
                        : addon::decode_session_wake_inspect_request(payload, &failure).has_value(),
             "fixture host request violates the SDK contract");
-        return addon::serialize_json(object({{"operation", Json(notify ? "notify" : "inspect")}, {"payload", payload}}));
+        return addon::serialize_json(json_util::object({{"operation", Json(notify ? "notify" : "inspect")}, {"payload", payload}}));
     }
 
     Scenario& m_scenario;
@@ -203,7 +202,7 @@ int main()
                     current_scenario = &scenario;
                     require(grok::serve(k_token, {"grok"}) == 0, "bridge failed");
                     require(scenario.prompt_count == 0, "abandoned read-only request submitted a prompt");
-                    require(!scenario.replies.empty() && member(scenario.replies.back(), "available") == Json(true),
+                    require(!scenario.replies.empty() && json_util::member(scenario.replies.back(), "available") == Json(true),
                         "read-only request interruption permanently disabled the live native connection");
                 }
             }
@@ -211,9 +210,9 @@ int main()
             current_scenario = &submitted;
             require(grok::serve(k_token, {"grok"}) == 0, "submitted bridge failed");
             require(submitted.prompt_count == 1, "uncertain prompt was submitted again");
-            require(submitted.replies.size() >= 3 && text(submitted.replies[1], "disposition") == "uncertain",
+            require(submitted.replies.size() >= 3 && json_util::text(submitted.replies[1], "disposition") == "uncertain",
                 "interruption after native write lost its uncertain outcome");
-            require(member(submitted.replies.back(), "available") == Json(false),
+            require(json_util::member(submitted.replies.back(), "available") == Json(false),
                 "ambiguous native submission silently reopened the connection");
         }
         std::cout << "Grok bridge request interruption tests passed\n";

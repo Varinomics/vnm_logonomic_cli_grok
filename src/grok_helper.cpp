@@ -14,6 +14,8 @@
 #include <fcntl.h>
 #include <io.h>
 #endif
+namespace json_util = logonomic::cli_addon::json;
+
 int main()
 {
     namespace addon = logonomic::cli_addon;
@@ -78,7 +80,7 @@ int main()
         outcome = client.deliver_provider_event(name, body, key, nonce);
     if (outcome.committed && outcome.accepted && (name == "SessionStart" || name == "SessionEnd")) {
         if (const auto* token = std::getenv(grok::k_wake_token_environment); token && !cancelled()) {
-            const auto observation = addon::serialize_json(grok::object({
+            const auto observation = addon::serialize_json(json_util::object({
                 {"operation", addon::Json_value("observe")}, {"token", addon::Json_value(token)},
                 {"transition_nonce", addon::Json_value(nonce)}, {"event", body}}));
             // Identity follows authenticated admission and precedes journal

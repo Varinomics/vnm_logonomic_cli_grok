@@ -10,6 +10,8 @@
 #include <system_error>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -17,9 +19,6 @@ using grok::Json;
 using grok::Wake_exchange;
 using grok::Wake_outcome;
 using grok::Wake_protocol;
-using grok::member;
-using grok::object;
-using grok::text;
 
 void require(bool condition, const char* message)
 {
@@ -30,16 +29,16 @@ void require(bool condition, const char* message)
 
 Json request(const std::string& bytes)
 {
-    const auto value = grok::parse(bytes);
+    const auto value = json_util::parse(bytes);
     require(value.has_value(), "missing or invalid request JSON");
-    require(text(*value, "jsonrpc") == "2.0", "request is not JSON-RPC");
+    require(json_util::text(*value, "jsonrpc") == "2.0", "request is not JSON-RPC");
     return *value;
 }
 
 std::string reply(const Json& query, Json result)
 {
-    return addon::serialize_json(object({
-        {"jsonrpc", Json("2.0")}, {"id", member(query, "id")}, {"result", std::move(result)}}));
+    return addon::serialize_json(json_util::object({
+        {"jsonrpc", Json("2.0")}, {"id", json_util::member(query, "id")}, {"result", std::move(result)}}));
 }
 
 std::string info_reply(const Json& query, const char* session = "original-session", const char* cwd = "/work")
@@ -47,33 +46,33 @@ std::string info_reply(const Json& query, const char* session = "original-sessio
     // Observed on native Windows Grok 1.0.52. The roster includes dormant
     // persisted sessions too; residency and exact identity must both match.
     auto sessions = Json::array();
-    sessions.push_back(object({{"sessionId", Json(session)}, {"cwd", Json(cwd)},
+    sessions.push_back(json_util::object({{"sessionId", Json(session)}, {"cwd", Json(cwd)},
         {"resident", Json(true)}, {"activity", Json("idle")},
-        {"origin", object({{"kind", Json("local")}})}}));
-    return reply(query, object({{"result", object({{"sessions", std::move(sessions)}})}}));
+        {"origin", json_util::object({{"kind", Json("local")}})}}));
+    return reply(query, json_util::object({{"result", json_util::object({{"sessions", std::move(sessions)}})}}));
 }
 
 std::string queued(const char* session, const char* notification, bool running = false)
 {
-    auto params = object({{"sessionId", Json(session)}, {"entries", Json::array()}});
+    auto params = json_util::object({{"sessionId", Json(session)}, {"entries", Json::array()}});
     if (running) {
         params.set("runningPromptId", Json(notification));
     }
     else {
         auto entries = Json::array();
-        entries.push_back(object({{"id", Json(notification)}, {"kind", Json("prompt")}}));
+        entries.push_back(json_util::object({{"id", Json(notification)}, {"kind", Json("prompt")}}));
         params.set("entries", std::move(entries));
     }
-    return addon::serialize_json(object({
+    return addon::serialize_json(json_util::object({
         {"jsonrpc", Json("2.0")}, {"method", Json("_x.ai/queue/changed")}, {"params", std::move(params)}}));
 }
 
 void initialize(Wake_protocol& protocol)
 {
     const auto query = request(protocol.initialize());
-    require(text(query, "method") == "initialize", "connection did not initialize ACP");
-    const auto exchange = protocol.receive(reply(query, object({
-        {"protocolVersion", Json(1)}, {"_meta", object({{"agentInstanceId", Json("original-leader")}})}})));
+    require(json_util::text(query, "method") == "initialize", "connection did not initialize ACP");
+    const auto exchange = protocol.receive(reply(query, json_util::object({
+        {"protocolVersion", Json(1)}, {"_meta", json_util::object({{"agentInstanceId", Json("original-leader")}})}})));
     require(exchange.stdin_bytes.empty() && exchange.results.empty(), "initialize mutated a native session");
     require(protocol.initialized() && !protocol.ready(), "initialize falsely established session readiness");
     require(protocol.agent_instance_id() == "original-leader", "leader identity was not retained");
@@ -83,8 +82,8 @@ void inspect(Wake_protocol& protocol, const char* session = "original-session", 
 {
     protocol.confirm_session(session);
     const auto query = request(protocol.inspect(session, cwd).stdin_bytes);
-    require(text(query, "method") == "_x.ai/sessions/list", "inspection was not a native roster read");
-    require(member(query, "params") == Json::object(), "inspection implicitly subscribed to a native session");
+    require(json_util::text(query, "method") == "_x.ai/sessions/list", "inspection was not a native roster read");
+    require(json_util::member(query, "params") == Json::object(), "inspection implicitly subscribed to a native session");
     const auto exchange = protocol.receive(info_reply(query, session, cwd));
     require(exchange.stdin_bytes.empty() && exchange.results.empty(), "inspection mutated the session");
     require(protocol.ready(), "matching native resident identity was not admitted");
@@ -93,19 +92,19 @@ void inspect(Wake_protocol& protocol, const char* session = "original-session", 
 Wake_exchange prepare_prompt(Wake_protocol& protocol, const char* notification = "mailbox-17")
 {
     const auto check = request(protocol.notify(notification, "Read your mailbox.").stdin_bytes);
-    require(text(check, "method") == "_x.ai/sessions/list", "notification skipped resident revalidation");
-    require(member(check, "params") == Json::object(), "resident recheck implicitly subscribed to a native session");
+    require(json_util::text(check, "method") == "_x.ai/sessions/list", "notification skipped resident revalidation");
+    require(json_util::member(check, "params") == Json::object(), "resident recheck implicitly subscribed to a native session");
     auto exchange = protocol.receive(info_reply(check, protocol.session_id().c_str()));
     require(exchange.writes_prompt && exchange.results.empty(), "notification claimed acceptance before writing");
     const auto query   = request(exchange.stdin_bytes);
-    const auto& params = member(query, "params");
-    require(text(query, "method") == "session/prompt", "notification did not use native ACP prompt");
-    require(text(params, "sessionId") == protocol.session_id(), "prompt changed the original native session");
-    require(text(member(params, "_meta"), "promptId") == notification, "prompt lost notification correlation");
-    require(member(member(params, "_meta"), "verbatim") == Json(true), "prompt altered notification semantics");
-    const auto& prompt = member(params, "prompt");
+    const auto& params = json_util::member(query, "params");
+    require(json_util::text(query, "method") == "session/prompt", "notification did not use native ACP prompt");
+    require(json_util::text(params, "sessionId") == protocol.session_id(), "prompt changed the original native session");
+    require(json_util::text(json_util::member(params, "_meta"), "promptId") == notification, "prompt lost notification correlation");
+    require(json_util::member(json_util::member(params, "_meta"), "verbatim") == Json(true), "prompt altered notification semantics");
+    const auto& prompt = json_util::member(params, "prompt");
     require(prompt.is_array() && prompt.as_array().size() == 1, "prompt content is not one text block");
-    require(text(prompt.as_array().front(), "text") == "Read your mailbox.", "notification text changed");
+    require(json_util::text(prompt.as_array().front(), "text") == "Read your mailbox.", "notification text changed");
     return exchange;
 }
 
@@ -135,7 +134,7 @@ void native_queue_and_deduplication()
         require_result(protocol.receive(queued("original-session", "mailbox-17", running)), Wake_outcome::ACCEPTED);
         require(protocol.receive(queued("original-session", "mailbox-17", running)).results.empty(),
             "repeated queue update produced duplicate acknowledgement");
-        require(protocol.receive(reply(prompt_query, object({{"stopReason", Json("end_turn")}}))).results.empty(),
+        require(protocol.receive(reply(prompt_query, json_util::object({{"stopReason", Json("end_turn")}}))).results.empty(),
             "turn completion was reported as another queue acknowledgement");
         inspect(protocol);
         require_result(protocol.notify("mailbox-17", "Read your mailbox."), Wake_outcome::ACCEPTED);
@@ -156,9 +155,9 @@ void permission_requests_remain_interactive()
     prepare_prompt(protocol);
     protocol.prompt_write_started();
     for (const char* method : {"session/request_permission", "_x.ai/ask_user_question", "_x.ai/approve_plan"}) {
-        const auto exchange = protocol.receive(addon::serialize_json(object({
+        const auto exchange = protocol.receive(addon::serialize_json(json_util::object({
             {"jsonrpc", Json("2.0")}, {"id", Json("native-callback")},
-            {"method", Json(method)}, {"params", object({{"sessionId", Json("original-session")}})}})));
+            {"method", Json(method)}, {"params", json_util::object({{"sessionId", Json("original-session")}})}})));
         require(exchange.stdin_bytes.empty() && exchange.results.empty(),
             "control client answered or resolved an interactive callback");
     }
@@ -170,7 +169,7 @@ void startup_and_session_identity()
     Wake_protocol protocol;
     initialize(protocol);
     auto query = request(protocol.inspect("original-session", "/work").stdin_bytes);
-    require(text(query, "method") == "_x.ai/sessions/list" && member(query, "params") == Json::object(),
+    require(json_util::text(query, "method") == "_x.ai/sessions/list" && json_util::member(query, "params") == Json::object(),
         "startup inspection implicitly subscribed to a native session");
     auto exchange = protocol.receive(info_reply(query));
     require(exchange.stdin_bytes.empty() && !protocol.ready(), "residency alone established the managed session identity");
@@ -208,14 +207,14 @@ void roster_rejects_nonresident_or_remote_sessions()
         protocol.confirm_session("original-session");
         const auto query = request(protocol.inspect("original-session", "/work").stdin_bytes);
         auto response = request(info_reply(query));
-        auto sessions = member(member(member(response, "result"), "result"), "sessions");
+        auto sessions = json_util::member(json_util::member(json_util::member(response, "result"), "result"), "sessions");
         auto& row = sessions.as_array().front();
         const std::string kind = invalid;
-        if (kind == "remote") row.set("origin", object({{"kind", Json("remote")}}));
+        if (kind == "remote") row.set("origin", json_util::object({{"kind", Json("remote")}}));
         else if (kind == "duplicate") sessions.push_back(row);
         else if (kind == "nonresident") row.set("resident", Json(false));
         else row.set("activity", Json(kind));
-        response.set("result", object({{"result", object({{"sessions", std::move(sessions)}})}}));
+        response.set("result", json_util::object({{"result", json_util::object({{"sessions", std::move(sessions)}})}}));
         const auto exchange = protocol.receive(addon::serialize_json(response));
         require(exchange.stdin_bytes.empty() && !protocol.ready(), "unqualified native roster row was admitted");
     }
@@ -225,12 +224,12 @@ void roster_rejects_nonresident_or_remote_sessions()
     protocol.confirm_session("original-session");
     const auto query = request(protocol.inspect("original-session", "/work").stdin_bytes);
     auto response = request(info_reply(query));
-    auto sessions = member(member(member(response, "result"), "result"), "sessions");
-    sessions.as_array().insert(sessions.as_array().begin(), object({
+    auto sessions = json_util::member(json_util::member(json_util::member(response, "result"), "result"), "sessions");
+    sessions.as_array().insert(sessions.as_array().begin(), json_util::object({
         {"sessionId", Json("first-unrelated-session")}, {"cwd", Json("/elsewhere")},
         {"resident", Json(true)}, {"activity", Json("idle")},
-        {"origin", object({{"kind", Json("local")}})}}));
-    response.set("result", object({{"result", object({{"sessions", std::move(sessions)}})}}));
+        {"origin", json_util::object({{"kind", Json("local")}})}}));
+    response.set("result", json_util::object({{"result", json_util::object({{"sessions", std::move(sessions)}})}}));
     protocol.receive(addon::serialize_json(response));
     require(protocol.ready(), "inspection selected the first session instead of the exact target");
 }
@@ -255,7 +254,7 @@ void resident_identity_and_protocol_failures()
     }
     Wake_protocol protocol;
     const auto query = request(protocol.initialize());
-    protocol.receive(reply(query, object({{"protocolVersion", Json(1)}})));
+    protocol.receive(reply(query, json_util::object({{"protocolVersion", Json(1)}})));
     require(!protocol.initialized() && !protocol.failure_reason().empty(), "missing native instance was admitted");
 }
 
@@ -278,7 +277,7 @@ void transport_outcomes()
     inspect(protocol);
     const auto prompt_query = request(prepare_prompt(protocol).stdin_bytes);
     protocol.prompt_write_started();
-    require_result(protocol.receive(reply(prompt_query, object({{"stopReason", Json("end_turn")}}))),
+    require_result(protocol.receive(reply(prompt_query, json_util::object({{"stopReason", Json("end_turn")}}))),
         Wake_outcome::UNCERTAIN);
     inspect(protocol);
     require_result(protocol.notify("mailbox-17", "Read your mailbox."), Wake_outcome::UNCERTAIN);
@@ -301,7 +300,7 @@ void retained_notification_capacity()
         const auto prompt_query = request(prepare_prompt(protocol, id.c_str()).stdin_bytes);
         protocol.prompt_write_started();
         require_result(protocol.receive(queued("original-session", id.c_str())), Wake_outcome::ACCEPTED, id.c_str());
-        protocol.receive(reply(prompt_query, object({{"stopReason", Json("end_turn")}})));
+        protocol.receive(reply(prompt_query, json_util::object({{"stopReason", Json("end_turn")}})));
     }
     const auto refused = protocol.notify("mailbox-capacity", "Read your mailbox.");
     require_result(refused, Wake_outcome::UNAVAILABLE, "mailbox-capacity");
