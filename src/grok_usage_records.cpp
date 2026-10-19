@@ -1,12 +1,12 @@
-#include <logonomic_cli_addon/package_source.h>
 #include "grok_usage_records.h"
+
+#include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/usage_temporal.h>
 
 #include <array>
 #include <charconv>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <ctime>
 #include <limits>
 #include <fstream>
@@ -50,77 +50,6 @@ std::optional<std::uint64_t> count(const addon::Json_value& value)
     }
     return static_cast<std::uint64_t>(number);
 }
-
-std::optional<std::int64_t> timestamp(std::string_view iso)
-{
-    // Grok persists RFC 3339; explicit offsets do not depend on local DST.
-    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
-    if (iso.size() < 19 || std::sscanf(std::string(iso.substr(0, 19)).c_str(),
-            "%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6)
-    {
-        return std::nullopt;
-    }
-    const std::chrono::year_month_day date{std::chrono::year{year},
-        std::chrono::month{static_cast<unsigned>(month)}, std::chrono::day{static_cast<unsigned>(day)}};
-    if (!date.ok() || year < 1 || year > 9999 || hour < 0 || hour > 23 ||
-        minute < 0 || minute > 59 || second < 0 || second > 59)
-    {
-        return std::nullopt;
-    }
-    std::size_t offset = 19;
-    std::int64_t milliseconds = 0;
-    if (offset < iso.size() && iso[offset] == '.') {
-        ++offset;
-        const auto begin = offset;
-        while (offset < iso.size() && iso[offset] >= '0' && iso[offset] <= '9') {
-            if (offset - begin < 3) {
-                milliseconds = milliseconds * 10 + (iso[offset] - '0');
-            }
-            ++offset;
-        }
-        if (offset == begin) {
-            return std::nullopt;
-        }
-        for (auto digits = offset - begin; digits < 3; ++digits) milliseconds *= 10;
-    }
-    if (offset == iso.size()) {
-        std::tm local{};
-        local.tm_year = year - 1900;
-        local.tm_mon = month - 1;
-        local.tm_mday = day;
-        local.tm_hour = hour;
-        local.tm_min = minute;
-        local.tm_sec = second;
-        local.tm_isdst = -1;
-        const auto seconds = std::mktime(&local);
-        if (seconds == static_cast<std::time_t>(-1)) return std::nullopt;
-        return static_cast<std::int64_t>(seconds) * 1000 + milliseconds;
-    }
-    int zone_minutes = 0;
-    if (offset < iso.size() && iso[offset] == 'Z' && offset + 1 == iso.size()) {
-        ++offset;
-    }
-    else
-    if (offset + 6 == iso.size() && (iso[offset] == '+' || iso[offset] == '-') && iso[offset + 3] == ':') {
-        int zone_hour = 0, zone_minute = 0;
-        if (std::sscanf(std::string(iso.substr(offset + 1)).c_str(), "%2d:%2d", &zone_hour, &zone_minute) != 2 ||
-            zone_hour > 23 || zone_minute > 59)
-        {
-            return std::nullopt;
-        }
-        zone_minutes = (zone_hour * 60 + zone_minute) * (iso[offset] == '-' ? -1 : 1);
-        offset = iso.size();
-    }
-    else {
-        return std::nullopt;
-    }
-    if (offset != iso.size()) {
-        return std::nullopt;
-    }
-    const std::int64_t days = std::chrono::sys_days(date).time_since_epoch().count();
-    return ((days * 24 + hour) * 3600 + minute * 60 + second - zone_minutes * 60) * 1000 + milliseconds;
-}
-
 
 } // namespace
 
@@ -196,7 +125,7 @@ bool read_session_usage(std::istream& input, const fs::path& path,
         if (cancelled()) return fail("cancelled");
         const auto turn = count(member(row, "turnNumber"));
         if (!turn || *turn > UINT32_MAX || !turn_numbers.insert(*turn).second) return fail("usage_turn_identity_invalid");
-        const auto instant = timestamp(text(row, "endedAt"));
+        const auto instant = addon::parse_native_usage_timestamp(text(row, "endedAt"));
         if (!instant) return fail("usage_timestamp_invalid");
         const auto seconds = static_cast<std::time_t>(*instant / 1000);
         std::tm local{};
