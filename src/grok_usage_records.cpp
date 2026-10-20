@@ -1,5 +1,6 @@
 #include "grok_usage_records.h"
 
+#include <logonomic_cli_addon/json_utilities.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/usage_temporal.h>
 
@@ -18,25 +19,16 @@ namespace {
 
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
+
+using addon::json::member;
+using addon::json::text;
+
 constexpr std::uint64_t k_max_exact_count = 9007199254740991;
 
 std::string path_text(const fs::path& path)
 {
     const auto bytes = path.u8string();
     return std::string(bytes.begin(), bytes.end());
-}
-
-const addon::Json_value& member(const addon::Json_value& object, std::string_view name)
-{
-    static const addon::Json_value absent;
-    const auto* value = object.find(name);
-    return value ? *value : absent;
-}
-
-std::string text(const addon::Json_value& object, std::string_view name)
-{
-    const auto& value = member(object, name);
-    return value.is_string() ? value.as_string() : std::string{};
 }
 
 std::optional<std::uint64_t> count(const addon::Json_value& value)
