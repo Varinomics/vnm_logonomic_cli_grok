@@ -3,6 +3,7 @@
 
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/json.h>
+#include <logonomic_cli_addon/json_utilities.h>
 #include <logonomic_cli_addon/package_source.h>
 
 #include <algorithm>
@@ -24,6 +25,8 @@ namespace {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 
+using addon::json::member;
+
 // Only the established weekly paid-plan case implies zero when usage is absent.
 constexpr std::string_view k_weekly_period = "USAGE_PERIOD_TYPE_WEEKLY";
 
@@ -35,13 +38,6 @@ struct Credential
     std::string              principal_id;
     std::chrono::sys_time<std::chrono::milliseconds> expires_at;
 };
-
-const addon::Json_value& member(const addon::Json_value& object, std::string_view name)
-{
-    static const addon::Json_value missing;
-    const auto* value = object.find(name);
-    return value ? *value : missing;
-}
 
 std::optional<std::string> read_bounded(const fs::path& path, std::size_t maximum)
 {
