@@ -164,7 +164,8 @@ set_tests_properties(grok_lifecycle_tests PROPERTIES TIMEOUT 120)
 add_test(NAME grok_package_validation COMMAND logonomic_cli_addon_validate "${GROK_PACKAGE_DIRECTORY}" --platform "${GROK_PLATFORM}")
 add_test(NAME grok_package_conformance COMMAND logonomic_cli_addon_conformance "${GROK_PACKAGE_DIRECTORY}")
 add_executable(grok_usage_cache_tests tests/grok_usage_cache_tests.cpp)
-target_link_libraries(grok_usage_cache_tests PRIVATE grok_provider)
+target_link_libraries(grok_usage_cache_tests PRIVATE
+    grok_provider logonomic_cli_addon_sdk::test_support)
 grok_target(grok_usage_cache_tests)
 add_dependencies(grok_usage_cache_tests grok_package)
 add_test(NAME grok_usage_cache_tests
