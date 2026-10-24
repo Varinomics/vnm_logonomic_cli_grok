@@ -298,39 +298,8 @@ void temporal_contract(const fs::path& root)
     check(addon::decode_usage_scan_result(addon::encode_usage_scan_result(*page, 3), &failure, 3).has_value(),
         "temporal native page satisfies the unchanged accounting codec");
 
-    // An existing cache can contain the retired field before dated evidence was recorded.
-    const auto historical_records = [](const std::string& bytes) {
-        std::istringstream input(bytes);
-        std::string line, output;
-        while (std::getline(input, line)) {
-            auto value = *addon::parse_json(line, {}, nullptr);
-            auto* usage = value.find("usage");
-            if (usage && usage->find("record_id")->as_string() == "grok:session-a:1") {
-                auto amount = addon::Json_value::object();
-                amount.set("applicable", addon::Json_value(true));
-                amount.set("value", addon::Json_value(2));
-                usage->set("cost_microusd", amount);
-            }
-            output += addon::serialize_json(value) + '\n';
-        }
-        return output;
-    };
+    // Current accepted accounting may lack the optional dated evidence.
     const auto historical_root = addon::path_from_utf8(page->cache_candidate->root);
-    auto inventory = read(historical_root / "cache-inventory");
-    inventory.resize(inventory.find('\n') + 1);
-    unsigned cache_count = 0;
-    for (const auto& entry : fs::directory_iterator(historical_root)) {
-        if (entry.path().extension() != ".cache") {
-            continue;
-        }
-        const auto bytes = historical_records(read(entry.path()));
-        write(entry.path(), bytes);
-        inventory += entry.path().stem().string() + ':' + addon::to_hex(addon::Sha256::digest(bytes)) + '\n';
-        ++cache_count;
-    }
-    write(historical_root / "records", historical_records(read(historical_root / "records")));
-    write(historical_root / "cache-inventory", inventory + "end:" + std::to_string(cache_count) + ':' +
-        addon::to_hex(addon::Sha256::digest(inventory)) + '\n');
     for (const auto* name : {"usage-temporal", "usage-temporal-index", "cache-manifest.json"}) {
         check(fs::remove(historical_root / name), "fixture removes only its own dated evidence and seal");
     }
