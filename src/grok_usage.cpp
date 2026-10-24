@@ -1522,19 +1522,6 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
                 check_cancel(cancelled);
                 require(manifest && manifest->format == "grok-turn-cache@1", "usage_cache_unavailable");
             }
-            if (request.native_file_cache) {
-                const auto& seed = *request.native_file_cache;
-                require(request.context.account_context &&
-                    seed.source_account_key == request.context.account_context->adapter_account_key,
-                    "usage_native_cache_account_mismatch");
-                addon::Directory_package_source source(storage);
-                addon::Source_error source_error;
-                const auto relative = addon::path_from_utf8(seed.path).lexically_relative(storage);
-                const auto bytes = source.read(addon::path_to_utf8(relative), 1, &source_error);
-                require(bytes && bytes->empty() && addon::to_hex(addon::Sha256::digest(*bytes)) == seed.sha256_hex,
-                    "usage_native_cache_unsupported");
-                require(!seed.cache_required || selection->accepted.has_value(), "required_usage_cache_unavailable");
-            }
         }
         else {
             root = directory(cache_io_path(storage), "grok-usage-v1");
