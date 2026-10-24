@@ -158,7 +158,7 @@ void quota_is_read_by_the_packaged_helper()
     Context prepared;
     prepare_quota(prepared);
     addon::Contract_failure failure;
-    const auto proposal = addon::decode_structured_prepare_result(prepared.output, &failure, 2);
+    const auto proposal = addon::decode_structured_prepare_result(prepared.output, &failure);
     check(prepared.succeeded && proposal && proposal->process.executable == addon::Process_executable(helper) &&
         proposal->process.argv.empty() && proposal->inspection.protocol_state == "await_bridge" &&
         proposal->process.environment == std::vector<std::pair<std::string, std::string>>{{"GROK_HOME", profile}},

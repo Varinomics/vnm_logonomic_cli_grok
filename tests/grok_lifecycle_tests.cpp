@@ -27,7 +27,7 @@ std::optional<addon::Lifecycle_declaration> package_lifecycle_declaration(const 
 {
     const addon::Directory_package_source source(package);
     const auto path = addon::sidecar_relative_path(
-        addon::k_lifecycle_events_capability_id, addon::k_lifecycle_events_correlated_version);
+        addon::k_lifecycle_events_capability_id, addon::k_lifecycle_events_version);
     const auto bytes = source.read(path, addon::limits::k_max_sidecar_bytes, nullptr);
     const auto sidecar = bytes ? addon::parse_sidecar(*bytes, nullptr) : std::nullopt;
     return sidecar ? addon::decode_lifecycle_declaration(sidecar->payload, nullptr) : std::nullopt;

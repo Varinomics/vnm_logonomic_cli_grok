@@ -56,7 +56,7 @@ void prepare_delegated(addon::Invocation_context& context)
     const bool structured = context.request().capability.capability_id == "structured-session";
     std::optional<addon::Delegated_prepare_request> request;
     if (structured) {
-        const auto input = addon::decode_structured_prepare_request(context.request().payload, &failure, 2);
+        const auto input = addon::decode_structured_prepare_request(context.request().payload, &failure);
         if (input) {
             request.emplace();
             request->purpose = input->purpose;
@@ -64,7 +64,7 @@ void prepare_delegated(addon::Invocation_context& context)
             request->prompt = input->prompt;
         }
     }
-    else request = addon::decode_delegated_prepare_request(context.request().payload, &failure, 2);
+    else request = addon::decode_delegated_prepare_request(context.request().payload, &failure);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
     if (!structured && !request->control.connection) {
         context.fail(addon::Result_status::UNAVAILABLE, "task_server_connection_unavailable");
@@ -140,9 +140,9 @@ void prepare_delegated(addon::Invocation_context& context)
         prepared.inspection = std::move(result.inspection);
         prepared.profile_storage = result.profile_storage;
         prepared.account_context = result.account_context;
-        payload = addon::encode_structured_prepare_result(prepared, 2);
+        payload = addon::encode_structured_prepare_result(prepared);
     }
-    else payload = addon::encode_delegated_prepare_result(result, 2);
+    else payload = addon::encode_delegated_prepare_result(result);
     if (!addon::validate_session_exchange_payload(payload, &failure)) {
         context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return;
     }
@@ -228,12 +228,12 @@ void handle_preparation(addon::Invocation_context& context)
     if (context.request().capability.capability_id == "structured-session" &&
         context.request().operation == addon::k_inspect_operation) {
         addon::Contract_failure failure;
-        const auto request = addon::decode_structured_inspect_request(context.request().payload, &failure, 2);
+        const auto request = addon::decode_structured_inspect_request(context.request().payload, &failure);
         if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
         if (request->purpose != addon::Structured_purpose::IMPLEMENTATION) {
             context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable"); return;
         }
-        context.succeed(addon::encode_structured_inspect_result(inspect_acp(request->inspection), 2)); return;
+        context.succeed(addon::encode_structured_inspect_result(inspect_acp(request->inspection))); return;
     }
 
     if (context.request().capability.capability_id != "launch-preparation" ||

@@ -200,7 +200,7 @@ int main(int argc, char** argv)
                 request.control.private_artifact_root = root.string();
                 Context task;
                 task.input.request_id = delegated ? "delegated" : "structured";
-                task.input.capability = {delegated ? "delegated-session" : "structured-session", 2};
+                task.input.capability = {delegated ? "delegated-session" : "structured-session", 3};
                 task.input.operation = "prepare";
                 if (delegated) {
                     addon::Delegated_task_server server;
@@ -216,20 +216,20 @@ int main(int argc, char** argv)
                     request.control.servers.push_back(server);
                     request.control.connection = addon::Delegated_connection{
                         (root / "host relay").string(), (root / ".logonomic/task-servers.json").string()};
-                    task.input.payload = addon::encode_delegated_prepare_request(request, 2);
+                    task.input.payload = addon::encode_delegated_prepare_request(request);
                 }
                 else {
                     addon::Structured_prepare_request structured;
                     structured.purpose = addon::Structured_purpose::IMPLEMENTATION;
                     structured.context = launch;
                     structured.prompt = request.prompt;
-                    task.input.payload = addon::encode_structured_prepare_request(structured, 2);
+                    task.input.payload = addon::encode_structured_prepare_request(structured);
                 }
                 grok::handle_preparation(task);
                 require(task.succeeded && addon::validate_session_exchange_payload(task.output, &failure),
                     "session producer duplicated inherited and frozen assignments");
                 if (delegated) {
-                    const auto delegated_result = addon::decode_delegated_prepare_result(task.output, &failure, 2);
+                    const auto delegated_result = addon::decode_delegated_prepare_result(task.output, &failure);
                     require(delegated_result &&
                         delegated_result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
                         addon::validate_delegated_acknowledgment(request.control, delegated_result->acknowledgment, &failure),
@@ -239,7 +239,7 @@ int main(int argc, char** argv)
                     request.control.connection.reset();
                     Context refused;
                     refused.input = task.input;
-                    refused.input.payload = addon::encode_delegated_prepare_request(request, 2);
+                    refused.input.payload = addon::encode_delegated_prepare_request(request);
                     grok::handle_preparation(refused);
                     require(!refused.succeeded, "missing connection must refuse delegation");
 
@@ -256,19 +256,19 @@ int main(int argc, char** argv)
                         posture.context.launcher_argv.back() = posture.context.launcher.script_body;
                         Context prepared_posture;
                         prepared_posture.input = task.input;
-                        prepared_posture.input.payload = addon::encode_delegated_prepare_request(posture, 2);
+                        prepared_posture.input.payload = addon::encode_delegated_prepare_request(posture);
                         grok::handle_preparation(prepared_posture);
                         return prepared_posture;
                     };
                     const auto approving = prepare_with(" --always-approve");
-                    const auto approving_result = addon::decode_delegated_prepare_result(approving.output, &failure, 2);
+                    const auto approving_result = addon::decode_delegated_prepare_result(approving.output, &failure);
                     require(approving.succeeded && approving_result, "a launcher's --always-approve is prepared");
                     const auto& agent_argv = approving_result->process.argv;
                     const auto approve = std::find(agent_argv.begin(), agent_argv.end(), "--always-approve");
                     require(approve != agent_argv.end() &&
                         std::find(approve, agent_argv.end(), "stdio") != agent_argv.end(),
                         "the launcher's --always-approve reaches grok agent");
-                    const auto plain_argv = addon::decode_delegated_prepare_result(task.output, &failure, 2)->process.argv;
+                    const auto plain_argv = addon::decode_delegated_prepare_result(task.output, &failure)->process.argv;
                     require(std::find(plain_argv.begin(), plain_argv.end(), "--always-approve") == plain_argv.end(),
                         "a launcher without it gets no approval the package added");
                     for (const std::string option : {"--permission-mode acceptEdits", "--allow Bash", "--deny Read"}) {

@@ -119,7 +119,7 @@ void handle_probes(addon::Invocation_context& context)
         result.profile_storage = request->context.profile_storage;
         result.account_context = request->context.account_context;
         result.inspection.protocol_state = quota ? "await_bridge" : "await_exit";
-        context.succeed(addon::encode_structured_prepare_result(result, 2));
+        context.succeed(addon::encode_structured_prepare_result(result));
         return;
     }
     if (context.request().operation != addon::k_inspect_operation) { context.reject_unknown_operation(); return; }
