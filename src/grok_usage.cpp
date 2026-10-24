@@ -3,6 +3,7 @@
 #include "grok_usage_records.h"
 
 #include <logonomic_cli_addon/json_utilities.h>
+#include <logonomic_cli_addon/stored_usage_accounting.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/sha256.h>
 #include <logonomic_cli_addon/ids.h>
@@ -13,7 +14,6 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
-#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -23,11 +23,9 @@
 #include <charconv>
 #include <chrono>
 #include <fstream>
-#include <memory>
 #include <mutex>
 #include <random>
 #include <stdexcept>
-#include <thread>
 
 namespace grok {
 namespace {
@@ -87,7 +85,7 @@ Disk_usage path_usage(const fs::path& path, const std::function<bool()>& cancell
     require(fs::is_regular_file(status), "usage_storage_invalid");
     usage.bytes = fs::file_size(path);
     if (limits) require(usage.bytes <= limits->disk_bytes, "usage_disk_budget_exceeded");
-    if (usage.bytes == 0) return usage; // Includes the exclusively held storage lock.
+    if (usage.bytes == 0) return usage;
     std::ifstream input(path, std::ios::binary);
     require(static_cast<bool>(input), "usage_storage_read_failed");
     std::array<char, 65536> bytes{};
@@ -170,55 +168,6 @@ void remove_owned_path(const fs::path& path)
     if (fs::remove(path) && active_budget) active_budget->release(usage);
 }
 
-// A retired generation may still be unwinding a scan while its replacement
-// starts. The storage lock therefore covers process generations as well as
-// concurrent calls in this process; no cache mutation relies on RPC ordering.
-class Storage_lock final
-{
-public:
-    Storage_lock(const fs::path& path, const std::function<bool()>& cancelled)
-    {
-        require(!fs::is_symlink(fs::symlink_status(path)), "usage_storage_link");
-#if defined(_WIN32)
-        while (m_handle == INVALID_HANDLE_VALUE) {
-            check_cancel(cancelled);
-            m_handle = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (m_handle != INVALID_HANDLE_VALUE) break;
-            require(GetLastError() == ERROR_SHARING_VIOLATION, "usage_storage_lock_failed");
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-#else
-        m_descriptor = open(path.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
-        require(m_descriptor >= 0, "usage_storage_lock_failed");
-        while (flock(m_descriptor, LOCK_EX | LOCK_NB) != 0) {
-            const int failure = errno;
-            if (cancelled() || (failure != EWOULDBLOCK && failure != EAGAIN && failure != EINTR)) {
-                close(m_descriptor); m_descriptor = -1;
-                throw Scan_failure{cancelled() ? "cancelled" : "usage_storage_lock_failed"};
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-#endif
-    }
-    ~Storage_lock()
-    {
-#if defined(_WIN32)
-        if (m_handle != INVALID_HANDLE_VALUE) CloseHandle(m_handle);
-#else
-        if (m_descriptor >= 0) close(m_descriptor);
-#endif
-    }
-    Storage_lock(const Storage_lock&) = delete;
-    Storage_lock& operator=(const Storage_lock&) = delete;
-private:
-#if defined(_WIN32)
-    HANDLE m_handle = INVALID_HANDLE_VALUE;
-#else
-    int m_descriptor = -1;
-#endif
-};
-
 std::string path_text(const fs::path& path)
 {
     const auto value = path.u8string();
@@ -282,70 +231,6 @@ void sync_directory(const fs::path& path)
 #endif
 }
 
-fs::path directory(const fs::path& parent, const std::string& name)
-{
-    const auto path = parent / name;
-    std::error_code error;
-    const auto status = fs::symlink_status(path, error);
-    require(!fs::is_symlink(status), "usage_storage_link");
-    if (!fs::exists(status)) {
-        error.clear();
-        if (active_budget) active_budget->reserve({0, 1, 0});
-        fs::create_directory(path, error);
-        require(!error, "usage_storage_create_failed");
-        sync_directory(parent);
-    }
-    require(fs::is_directory(fs::symlink_status(path, error)) && !error, "usage_storage_invalid");
-    return path;
-}
-
-void remove_snapshot(const fs::path& path)
-{
-    require(digest_name(path.filename().string()), "usage_snapshot_invalid");
-    require(fs::is_directory(fs::symlink_status(path)), "usage_storage_invalid");
-    // All entries written here are files. Refuse foreign directories instead
-    // of following or recursively removing anything in an unexpected shape.
-    for (const auto& entry : fs::directory_iterator(path)) {
-        require(!fs::is_directory(entry.symlink_status()), "usage_storage_invalid");
-        remove_owned_path(entry.path());
-    }
-    remove_owned_path(path);
-}
-
-class Pending_snapshot final
-{
-public:
-    explicit Pending_snapshot(fs::path path) : m_path(std::move(path)) {}
-    ~Pending_snapshot()
-    {
-        if (!m_committed) {
-            const auto budget = active_budget;
-            active_budget = nullptr; // Cleanup only removes files; cancellation must not inhibit it.
-            try { remove_snapshot(m_path); } catch (...) { /* The next scan retries owned scratch cleanup. */ }
-            active_budget = budget;
-        }
-    }
-    void commit() { m_committed = true; }
-private:
-    fs::path m_path;
-    bool m_committed = false;
-};
-
-struct Accepted_generations
-{
-    std::string current;
-    std::optional<std::string> previous;
-};
-
-void prune_snapshots(const fs::path& snapshots, const Accepted_generations& accepted)
-{
-    for (const auto& entry : fs::directory_iterator(snapshots)) {
-        const auto name = entry.path().filename().string();
-        if (!digest_name(name) || name == accepted.current || name == accepted.previous) continue;
-        remove_snapshot(entry.path());
-    }
-}
-
 bool read_line(std::istream& input, std::string* line)
 {
     line->clear();
@@ -368,7 +253,7 @@ void write_line(std::ostream& output, std::string_view line)
     require(static_cast<bool>(output), "usage_storage_write_failed");
 }
 
-void replace_file(const fs::path& source, const fs::path& destination, bool* replaced = nullptr)
+void replace_file(const fs::path& source, const fs::path& destination)
 {
     const auto previous_usage = active_budget ? active_budget->inspect(destination) : Disk_usage{};
     std::error_code error;
@@ -382,9 +267,6 @@ void replace_file(const fs::path& source, const fs::path& destination, bool* rep
     fs::rename(source, destination, error);
     require(!error, "usage_storage_replace_failed");
 #endif
-    if (replaced) {
-        *replaced = true;
-    }
     if (active_budget) active_budget->release(previous_usage);
     sync_directory(destination.parent_path());
     if (source.parent_path() != destination.parent_path()) {
@@ -392,7 +274,7 @@ void replace_file(const fs::path& source, const fs::path& destination, bool* rep
     }
 }
 
-void write_json(const fs::path& path, const addon::Json_value& value, bool* replaced = nullptr)
+void write_json(const fs::path& path, const addon::Json_value& value)
 {
     const auto temporary = path.parent_path() / (path.filename().string() + ".pending");
     require(!fs::is_symlink(fs::symlink_status(temporary)), "usage_storage_link");
@@ -401,7 +283,7 @@ void write_json(const fs::path& path, const addon::Json_value& value, bool* repl
     write_line(output, addon::serialize_json(value));
     output.close();
     require(static_cast<bool>(output), "usage_storage_write_failed");
-    replace_file(temporary, path, replaced);
+    replace_file(temporary, path);
 }
 
 std::optional<addon::Json_value> read_json(const fs::path& path)
@@ -427,12 +309,12 @@ std::string string_member(const addon::Json_value& object, std::string_view name
     return value.as_string();
 }
 
-// Persist through the public codec so scanner caches cannot acquire a second
-// interpretation of category coverage or repository allocation records.
+// Current stored accounting shares category and repository validation with
+// public usage records without adding page-level evidence to cache bytes.
 std::string encode_record(const Session_usage_record& record)
 {
     auto envelope = addon::Json_value::object();
-    envelope.set("usage", addon::encode_usage_record(record.usage, 2));
+    envelope.set("usage", addon::encode_stored_usage_accounting(record.usage));
     envelope.set("recorded_cwd", addon::Json_value(record.recorded_cwd));
     return addon::serialize_json(envelope);
 }
@@ -444,7 +326,7 @@ Session_usage_record decode_record(std::string_view line)
     auto* usage = value->find("usage");
     require(usage && usage->is_object(), "usage_cache_invalid");
     addon::Contract_failure failure;
-    auto record = addon::decode_usage_record(*usage, &failure, 2);
+    auto record = addon::decode_stored_usage_accounting(*usage, &failure);
     require(record.has_value(), "usage_cache_invalid");
     return {std::move(*record), string_member(*value, "recorded_cwd")};
 }
@@ -549,23 +431,6 @@ void refresh_file(const fs::path& path, const fs::path& work,
 addon::Json_value account_value(const std::optional<addon::Account_context>& account)
 {
     return account ? addon::Json_value(account->adapter_account_key) : addon::Json_value{};
-}
-
-Accepted_generations accepted_generations(const fs::path& root)
-{
-    const auto pointer = read_json(root / "accepted");
-    if (!pointer) {
-        return {};
-    }
-    Accepted_generations accepted;
-    accepted.current = string_member(*pointer, "snapshot_id");
-    require(digest_name(accepted.current), "required_usage_cache_unavailable");
-    const auto& previous = member(*pointer, "previous_snapshot_id");
-    if (!previous.is_null()) {
-        require(previous.is_string() && digest_name(previous.as_string()), "required_usage_cache_unavailable");
-        accepted.previous = previous.as_string();
-    }
-    return accepted;
 }
 
 std::string file_digest(const fs::path& path, const std::function<bool()>& cancelled)
@@ -1382,7 +1247,7 @@ std::uint64_t decimal(std::string_view text)
 
 addon::Usage_scan_page page_at(const fs::path& snapshot, const std::string& identifier,
     std::uint64_t offset, const std::optional<addon::Account_context>& account, const std::function<bool()>& cancelled,
-    const addon::Usage_scan_request* request = nullptr)
+    const addon::Usage_scan_request& request)
 {
     require(fs::is_directory(fs::symlink_status(snapshot)), "usage_snapshot_expired");
     const auto metadata = read_json(snapshot / "snapshot");
@@ -1395,16 +1260,13 @@ addon::Usage_scan_page page_at(const fs::path& snapshot, const std::string& iden
     addon::Usage_scan_page page;
     page.scope = *encoded_scope;
     page.snapshot_id = identifier;
-    std::optional<Temporal_lookup> temporal;
-    if (request) {
-        page.account_context = request->context.account_context;
-        page.profile_storage = request->context.profile_storage;
-        // The final seal replaces only this fixed-width digest. All other
-        // context and prospective cursor bytes participate in admission.
-        page.cache_candidate = addon::Usage_cache_reference{
-            request->cache_selection->candidate_root, identifier, std::string(64, '0')};
-        temporal.emplace(snapshot, account, identifier);
-    }
+    Temporal_lookup temporal(snapshot, account, identifier);
+    page.account_context = request.context.account_context;
+    page.profile_storage = request.context.profile_storage;
+    // The final seal replaces only this fixed-width digest. All other
+    // context and prospective cursor bytes participate in admission.
+    page.cache_candidate = addon::Usage_cache_reference{
+        request.cache_selection->candidate_root, identifier, std::string(64, '0')};
     const auto& incomplete = member(*metadata, "incomplete");
     require(incomplete.is_boolean(), "usage_snapshot_invalid");
     page.incomplete_historical_coverage = incomplete.as_boolean();
@@ -1426,28 +1288,25 @@ addon::Usage_scan_page page_at(const fs::path& snapshot, const std::string& iden
         check_cancel(cancelled);
         if (!page.records.empty() && bytes + line.size() > k_line_limit / 2) break;
         auto record = decode_record(line).usage;
-        if (request) {
-            record.aggregate_evidence = "partial";
-            temporal->apply(record, line, offset, identifier, page.scope.source_account_key);
-            const auto next = offset + line.size() + 1;
-            page.complete = next == size;
-            page.next_cursor = page.complete ? std::nullopt : std::optional(std::to_string(next));
+        record.aggregate_evidence = "partial";
+        temporal.apply(record, line, offset, identifier, page.scope.source_account_key);
+        const auto next = offset + line.size() + 1;
+        page.complete = next == size;
+        page.next_cursor = page.complete ? std::nullopt : std::optional(std::to_string(next));
+        if (!addon::append_usage_page_record(page, record, encoded_records_bytes, 3)) {
+            if (!page.records.empty()) break;
+            if (record.temporal) {
+                record.temporal->portions.clear();
+                record.temporal->unavailable_tokens = record.total_tokens;
+                record.temporal->coverage_reason = "capacity";
+                if (!valid_temporal_record(record)) record.temporal.reset();
+            }
             if (!addon::append_usage_page_record(page, record, encoded_records_bytes, 3)) {
-                if (!page.records.empty()) break;
-                if (record.temporal) {
-                    record.temporal->portions.clear();
-                    record.temporal->unavailable_tokens = record.total_tokens;
-                    record.temporal->coverage_reason = "capacity";
-                    if (!valid_temporal_record(record)) record.temporal.reset();
-                }
-                if (!addon::append_usage_page_record(page, record, encoded_records_bytes, 3)) {
-                    record.temporal.reset();
-                    require(addon::append_usage_page_record(page, record, encoded_records_bytes, 3),
-                        "usage_record_frame_capacity");
-                }
+                record.temporal.reset();
+                require(addon::append_usage_page_record(page, record, encoded_records_bytes, 3),
+                    "usage_record_frame_capacity");
             }
         }
-        else page.records.push_back(std::move(record));
         bytes += line.size();
         offset += line.size() + 1;
     }
@@ -1467,70 +1326,36 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
         std::unique_lock lock(scan_mutex, std::defer_lock);
         while (!lock.try_lock_for(std::chrono::milliseconds(50))) check_cancel(cancelled);
         check_cancel(cancelled);
-        // Bootstrap creates only these three zero-byte entries before inventory.
-        require(limits.filesystem_entries >= 3, "usage_disk_budget_exceeded");
-        const auto* selection = request.cache_selection ? &*request.cache_selection : nullptr;
         addon::Contract_failure failure;
-        std::string request_hash;
-        fs::path root;
-        fs::path snapshots;
-        std::unique_ptr<Storage_lock> storage_lock;
-        if (selection) {
-            require(addon::validate_usage_cache_selection(request, &failure), "usage_cache_selection_invalid");
-            const auto outside_mutable = [&](const std::string& selected) {
-                const auto mutable_path = storage / "grok-usage-v1";
-                for (auto path = addon::path_from_utf8(selected); path.has_relative_path(); path = path.parent_path()) {
-                    std::error_code error;
-                    if (fs::equivalent(path, mutable_path, error)) {
-                        return false;
-                    }
-                }
-                const auto relative = addon::path_from_utf8(selected).lexically_relative(storage);
-                auto name = addon::path_to_utf8(*relative.begin());
-#ifdef _WIN32
-                name = addon::ascii_lowercase(name);
-#endif
-                return name != "grok-usage-v1";
-            };
-            require(outside_mutable(selection->candidate_root) &&
-                (!selection->accepted || outside_mutable(selection->accepted->root)), "usage_cache_namespace_conflict");
-            require(addon::validate_usage_cache_root(selection->candidate_root, addon::path_to_utf8(storage), &failure),
-                "usage_cache_unavailable");
-            root = cache_io_path(addon::path_from_utf8(selection->candidate_root));
-            auto identity = request;
-            identity.snapshot_id.reset();
-            identity.cursor.reset();
-            request_hash = addon::to_hex(addon::Sha256::digest(
-                addon::serialize_json_canonical(addon::encode_usage_scan_request(identity, 3))));
-            if (request.snapshot_id) {
-                const auto state = read_json(root / "cache-state");
-                require(state && string_member(*state, "request_sha256") == request_hash &&
-                    string_member(*state, "snapshot_id") == *request.snapshot_id, "usage_snapshot_mismatch");
-                auto page = page_at(root, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled, &request);
-                page.cache_candidate = addon::Usage_cache_reference{
-                    selection->candidate_root, page.snapshot_id, file_digest(root / "cache-manifest.json", cancelled)};
-                page.account_context = request.context.account_context;
-                page.profile_storage = request.context.profile_storage;
-                for (auto& record : page.records) record.aggregate_evidence = "partial";
-                return page;
-            }
-            require(addon::validate_usage_cache_allocation(selection->candidate_root, addon::path_to_utf8(storage), &failure),
-                "usage_cache_unavailable");
-            if (selection->accepted) {
-                const auto manifest = addon::validate_usage_cache_candidate(*selection->accepted,
-                    addon::path_to_utf8(storage), request.context.account_context, cancelled, &failure);
-                check_cancel(cancelled);
-                require(manifest && manifest->format == "grok-turn-cache@1", "usage_cache_unavailable");
-            }
-        }
-        else {
-            root = directory(cache_io_path(storage), "grok-usage-v1");
-            storage_lock = std::make_unique<Storage_lock>(root / "scan.lock", cancelled);
-            snapshots = directory(root, "snapshots");
-        }
+        require(addon::validate_usage_cache_selection(request, &failure), "usage_cache_selection_invalid");
+        const auto& selection = *request.cache_selection;
+        require(addon::validate_usage_cache_root(selection.candidate_root, addon::path_to_utf8(storage), &failure),
+            "usage_cache_unavailable");
+        const auto root = cache_io_path(addon::path_from_utf8(selection.candidate_root));
+        auto identity = request;
+        identity.snapshot_id.reset();
+        identity.cursor.reset();
+        const auto request_hash = addon::to_hex(addon::Sha256::digest(
+            addon::serialize_json_canonical(addon::encode_usage_scan_request(identity, 3))));
         if (request.snapshot_id) {
-            require(digest_name(*request.snapshot_id) && request.cursor.has_value(), "usage_cursor_invalid");
-            return page_at(snapshots / *request.snapshot_id, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled);
+            const auto state = read_json(root / "cache-state");
+            require(state && string_member(*state, "request_sha256") == request_hash &&
+                string_member(*state, "snapshot_id") == *request.snapshot_id, "usage_snapshot_mismatch");
+            auto page = page_at(root, *request.snapshot_id, decimal(*request.cursor), request.context.account_context, cancelled, request);
+            page.cache_candidate = addon::Usage_cache_reference{
+                selection.candidate_root, page.snapshot_id, file_digest(root / "cache-manifest.json", cancelled)};
+            page.account_context = request.context.account_context;
+            page.profile_storage = request.context.profile_storage;
+            for (auto& record : page.records) record.aggregate_evidence = "partial";
+            return page;
+        }
+        require(addon::validate_usage_cache_allocation(selection.candidate_root, addon::path_to_utf8(storage), &failure),
+            "usage_cache_unavailable");
+        if (selection.accepted) {
+            const auto manifest = addon::validate_usage_cache_candidate(*selection.accepted,
+                addon::path_to_utf8(storage), request.context.account_context, cancelled, &failure);
+            check_cancel(cancelled);
+            require(manifest && manifest->format == "grok-turn-cache@1", "usage_cache_unavailable");
         }
         require(!request.cursor, "usage_cursor_invalid");
         Disk_budget budget(root, limits, cancelled);
@@ -1539,19 +1364,11 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
         const auto sessions = vendor_profile / "sessions";
         const bool have_sessions = fs::exists(sessions);
         require(!have_sessions || fs::is_directory(sessions), "usage_sessions_not_directory");
-        const auto accepted = selection ? Accepted_generations{} : accepted_generations(root);
-        if (!selection) prune_snapshots(snapshots, accepted);
         const auto identifier = nonce();
-        const auto work = selection ? root : directory(snapshots, identifier);
-        Pending_snapshot pending(work);
-        // Host allocations, including failed writes, remain owned by the host.
-        if (selection) pending.commit();
-        if (selection && selection->accepted) {
-            copy_accepted_cache(cache_io_path(addon::path_from_utf8(selection->accepted->root)), work,
+        const auto& work = root;
+        if (selection.accepted) {
+            copy_accepted_cache(cache_io_path(addon::path_from_utf8(selection.accepted->root)), work,
                 request.context.account_context, cancelled);
-        }
-        if (!accepted.current.empty()) {
-            copy_accepted_cache(snapshots / accepted.current, work, request.context.account_context, cancelled);
         }
         bool incomplete = false;
         // RelocationView owns only <cwd bucket>/<session id>, never nested
@@ -1585,44 +1402,23 @@ std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request
         sync_file(work / "records");
         write_json(work / "snapshot", metadata);
         check_cancel(cancelled);
-        if (selection) {
-            auto state = addon::Json_value::object();
-            state.set("request_sha256", addon::Json_value(request_hash));
-            state.set("snapshot_id", addon::Json_value(identifier));
-            write_json(work / "cache-state", state);
-            // The SDK writes its manifest outside Budget_output. Reserve the
-            // complete original seal before optional scratch can consume space.
-            budget.reserve({cache_manifest_bytes(work, request.context.account_context, identifier), 1, 0});
-            prepare_temporal(work, selection->accepted, request.context.account_context, identifier, cancelled);
-            auto page = page_at(work, identifier, 0, request.context.account_context, cancelled, &request);
-            // A surviving native session file does not prove complete aggregate history.
-            for (auto& record : page.records) record.aggregate_evidence = "partial";
-            page.cache_candidate = addon::seal_usage_cache_candidate(
-                selection->candidate_root, addon::path_to_utf8(storage), request.context.account_context,
-                identifier, "grok-turn-cache@1", cancelled, &failure);
-            if (!page.cache_candidate) throw Scan_failure{failure.reason_code};
-            page.account_context = request.context.account_context;
-            page.profile_storage = request.context.profile_storage;
-            return page;
-        }
-        auto page = page_at(work, identifier, 0, request.context.account_context, cancelled);
-        auto pointer = addon::Json_value::object();
-        pointer.set("snapshot_id", addon::Json_value(identifier));
-        pointer.set("previous_snapshot_id", accepted.current.empty()
-            ? addon::Json_value{} : addon::Json_value(accepted.current));
-        // A post-rename sync failure has an indeterminate commit outcome. Preserve
-        // the candidate so cleanup can never delete a possibly referenced generation.
-        pending.commit();
-        bool published = false;
-        try {
-            write_json(root / "accepted", pointer, &published);
-        }
-        catch (...) {
-            if (published) {
-                throw Scan_failure{"usage_cache_commit_indeterminate"};
-            }
-            throw;
-        }
+        auto state = addon::Json_value::object();
+        state.set("request_sha256", addon::Json_value(request_hash));
+        state.set("snapshot_id", addon::Json_value(identifier));
+        write_json(work / "cache-state", state);
+        // The SDK writes its manifest outside Budget_output. Reserve the
+        // complete original seal before optional scratch can consume space.
+        budget.reserve({cache_manifest_bytes(work, request.context.account_context, identifier), 1, 0});
+        prepare_temporal(work, selection.accepted, request.context.account_context, identifier, cancelled);
+        auto page = page_at(work, identifier, 0, request.context.account_context, cancelled, request);
+        // A surviving native session file does not prove complete aggregate history.
+        for (auto& record : page.records) record.aggregate_evidence = "partial";
+        page.cache_candidate = addon::seal_usage_cache_candidate(
+            selection.candidate_root, addon::path_to_utf8(storage), request.context.account_context,
+            identifier, "grok-turn-cache@1", cancelled, &failure);
+        if (!page.cache_candidate) throw Scan_failure{failure.reason_code};
+        page.account_context = request.context.account_context;
+        page.profile_storage = request.context.profile_storage;
         return page;
     }
     catch (const Scan_failure& failure) { *error = failure.reason; }
@@ -1635,8 +1431,7 @@ void handle_usage(addon::Invocation_context& context)
 {
     if (context.request().operation != addon::k_usage_scan_operation) { context.reject_unknown_operation(); return; }
     addon::Contract_failure failure;
-    const auto version = context.request().capability.version;
-    const auto request = addon::decode_usage_scan_request(context.request().payload, &failure, version);
+    const auto request = addon::decode_usage_scan_request(context.request().payload, &failure, 3);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code); return; }
     const auto profile = selected_profile(request->context, context);
     if (!profile) return;
@@ -1645,7 +1440,7 @@ void handle_usage(addon::Invocation_context& context)
     const auto page = scan_usage(*request, logonomic::cli_addon::path_from_utf8(profile->profile_path), logonomic::cli_addon::path_from_utf8(request->context.profile_storage->root),
         [&context] { return context.cancel_requested(); }, &error);
     if (!page) { context.fail(error == "cancelled" ? addon::Result_status::CANCELLED : addon::Result_status::FAILED, error); return; }
-    context.succeed(addon::encode_usage_scan_result(*page, version));
+    context.succeed(addon::encode_usage_scan_result(*page, 3));
 }
 
 } // namespace grok

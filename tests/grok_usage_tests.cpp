@@ -65,6 +65,17 @@ std::string usage(int input = 20, bool incomplete = false, std::string_view sess
     return addon::serialize_json(result);
 }
 
+void select_cache(addon::Usage_scan_request& request, const fs::path& storage,
+    const char* name, std::optional<addon::Usage_cache_reference> accepted = std::nullopt)
+{
+    const auto candidate = storage / name;
+    check(fs::create_directory(candidate), "allocate an exclusive current cache candidate");
+    request.context.profile_storage = addon::Profile_storage_context{1, addon::path_to_utf8(storage)};
+    request.snapshot_id.reset();
+    request.cursor.reset();
+    request.cache_selection = addon::Usage_cache_selection{std::move(accepted), addon::path_to_utf8(candidate)};
+}
+
 void exercise(const fs::path& root)
 {
     const auto profile = root / "profile";
@@ -81,6 +92,8 @@ void exercise(const fs::path& root)
     addon::Usage_scan_request request;
     request.context.account_context = addon::Account_context{1, "fixture"};
     std::string error;
+    select_cache(request, storage, "first");
+    const auto first_request = request;
     const auto first = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(first.has_value(), error.c_str());
     check(first->records.size() == 1, "one native turn produces one record");
@@ -91,13 +104,14 @@ void exercise(const fs::path& root)
     check(row.source_counter_semantics == "per_event_sum",
         "native turn deltas retain per-event source semantics");
     addon::Contract_failure failure;
-    check(addon::decode_usage_scan_result(addon::encode_usage_scan_result(*first, 2), &failure, 2).has_value(),
+    check(addon::decode_usage_scan_result(addon::encode_usage_scan_result(*first, 3), &failure, 3).has_value(),
         "native usage page satisfies the host usage-scan contract");
 
     write(session / "summary.json", summary("fork", true));
+    select_cache(request, storage, "fork-refusal", first->cache_candidate);
     check(!grok::scan_usage(request, profile, storage, [] { return false; }, &error) &&
         error == "usage_fork_attribution_unavailable", "copied fork fails even when usage fingerprint is unchanged");
-    auto replay = request;
+    auto replay = first_request;
     replay.snapshot_id = first->snapshot_id;
     replay.cursor = "0";
     const auto prior = grok::scan_usage(replay, profile, storage, [] { return false; }, &error);
@@ -105,9 +119,11 @@ void exercise(const fs::path& root)
 
     write(session / "summary.json", summary());
     write(session / "usage.json", usage(30, true));
+    select_cache(request, storage, "partial", first->cache_candidate);
     const auto partial = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(partial && partial->incomplete_historical_coverage, "incomplete native usage retains its coverage");
     fs::remove(session / "usage.json");
+    select_cache(request, storage, "retained", partial->cache_candidate);
     const auto retained = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(retained && retained->records.front().total_tokens == 35 && retained->incomplete_historical_coverage,
         "missing source retains last known evidence and its incomplete coverage");
@@ -122,10 +138,12 @@ void exercise(const fs::path& root)
     write(session / "usage.json", usage(300));
     grok::Usage_scan_limits limits;
     limits.candidate_records = 0;
+    select_cache(request, storage, "bounded", retained->cache_candidate);
     check(!grok::scan_usage(request, profile, storage, [] { return false; }, &error, limits) &&
         error == "usage_candidate_budget_exceeded", "candidate bound rejects source before publication");
+    select_cache(request, storage, "cancelled", retained->cache_candidate);
     check(!grok::scan_usage(request, profile, storage, [] { return true; }, &error) && error == "cancelled",
-        "production cancellation interrupts without starting a candidate");
+        "production cancellation interrupts before writing candidate data");
 
     const auto case_profile = root / "case-profile";
     const auto case_session = case_profile / "sessions" / "cwd" / "session-a";
@@ -135,6 +153,7 @@ void exercise(const fs::path& root)
     write(case_session / "summary.json", summary());
     write(case_session / "USAGE.JSON", usage());
     const bool native_lookup_exists = fs::is_regular_file(case_session / "usage.json");
+    select_cache(request, case_storage, "case-sensitive");
     const auto case_page = grok::scan_usage(request, case_profile, case_storage, [] { return false; }, &error);
     check(case_page && case_page->records.size() == (native_lookup_exists ? 1u : 0u),
         "discovery uses exact native path with filesystem case semantics");
@@ -151,6 +170,7 @@ void interrupted_refresh(const fs::path& root)
     write(session / "usage.json", usage());
     addon::Usage_scan_request request;
     std::string error;
+    select_cache(request, storage, "accepted");
     const auto accepted = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(accepted && accepted->records.size() == 1 && accepted->records.front().total_tokens == 25,
         "recovery fixture has accepted history");
@@ -181,9 +201,11 @@ void interrupted_refresh(const fs::path& root)
             }
             return false;
         };
+    select_cache(request, storage, "interrupted", accepted->cache_candidate);
     check(!grok::scan_usage(request, profile, storage, cancel_after_refresh, &error) &&
         interrupted && error == "cancelled", "interrupt after source artifact replacement before scan acceptance");
     fs::remove(session / "usage.json");
+    select_cache(request, storage, "retained", accepted->cache_candidate);
     const auto retained = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(retained && retained->records.size() == 1 && retained->records.front().total_tokens == 25,
         "source deletion after rejected refresh retains the accepted generation");
@@ -195,24 +217,28 @@ void interrupted_refresh(const fs::path& root)
     write(session / "usage.json", usage(300));
     grok::Usage_scan_limits limits;
     limits.candidate_records = 1;
+    select_cache(request, storage, "aggregate-refusal", retained->cache_candidate);
     check(!grok::scan_usage(request, profile, storage, [] { return false; }, &error, limits) &&
         error == "usage_candidate_budget_exceeded", "aggregate rejection occurs after individually valid refreshes");
     fs::remove(session / "usage.json");
     fs::remove(second_session / "usage.json");
+    select_cache(request, storage, "after-refusal", retained->cache_candidate);
     const auto after_rejection = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(after_rejection && after_rejection->records.size() == 1 && after_rejection->records.front().total_tokens == 25,
         "rejected scan cannot retain newer rows or adopt a newly discovered source");
 
     write(session / "usage.json", usage(300));
+    select_cache(request, storage, "updated", after_rejection->cache_candidate);
     const auto updated = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(updated && updated->records.size() == 1 && updated->records.front().total_tokens == 305,
         "complete replacement publishes new records");
     fs::remove(session / "usage.json");
+    select_cache(request, storage, "updated-retained", updated->cache_candidate);
     const auto updated_retained = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
     check(updated_retained && updated_retained->records.size() == 1 && updated_retained->records.front().total_tokens == 305,
         "committed replacement survives loss of native source");
 
-    const auto generation = storage / "grok-usage-v1" / "snapshots" / updated_retained->snapshot_id;
+    const auto generation = addon::path_from_utf8(updated_retained->cache_candidate->root);
     fs::path retained_artifact;
     for (const auto& entry : fs::directory_iterator(generation)) {
         if (entry.path().extension() == ".cache") {
@@ -230,8 +256,9 @@ void interrupted_refresh(const fs::path& root)
     records << cache_input.rdbuf();
     cache_input.close();
     write(retained_artifact, addon::serialize_json(*metadata) + "\n" + records.str());
+    select_cache(request, storage, "tampered", updated_retained->cache_candidate);
     check(!grok::scan_usage(request, profile, storage, [] { return false; }, &error) &&
-        error == "required_usage_cache_unavailable", "accepted manifest binds exact contents as well as source names");
+        error == "usage_cache_unavailable", "accepted manifest binds exact contents as well as source names");
 }
 
 std::string read(const fs::path& path)
@@ -284,9 +311,6 @@ void temporal_contract(const fs::path& root)
     request.context.account_context = addon::Account_context{2, "fixture", addon::path_to_utf8(profile)};
     request.context.profile_storage = addon::Profile_storage_context{1, addon::path_to_utf8(storage)};
     std::string error;
-    const auto legacy = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
-    check(legacy && legacy->records.size() == 4, "legacy native accounting admits all four turns");
-    for (const auto& row : legacy->records) check(!row.temporal, "usage2 never emits optional temporal evidence");
     const auto candidate = storage / "selected";
     fs::create_directory(candidate);
     request.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(candidate)};
@@ -297,6 +321,8 @@ void temporal_contract(const fs::path& root)
         request.context.account_context, [] { return false; }, &failure).has_value(), "temporal candidate is durably sealed");
     check(addon::decode_usage_scan_result(addon::encode_usage_scan_result(*page, 3), &failure, 3).has_value(),
         "temporal native page satisfies the unchanged accounting codec");
+
+    const auto accepted_accounting = page->records;
 
     // Current accepted accounting may lack the optional dated evidence.
     const auto historical_root = addon::path_from_utf8(page->cache_candidate->root);
@@ -314,8 +340,8 @@ void temporal_contract(const fs::path& root)
     for (unsigned index = 0; index < totals.size(); ++index) {
         const auto& row = page->records[index];
         check(row.record_id == "grok:session-a:" + std::to_string(index + 1) && row.total_tokens == totals[index] &&
-            row.completed_date == legacy->records[index].completed_date &&
-            row.semantics == legacy->records[index].semantics,
+            row.completed_date == accepted_accounting[index].completed_date &&
+            row.semantics == accepted_accounting[index].semantics,
             "native temporal proof preserves original identity, total, date and replay semantics");
         check(row.temporal && row.temporal->parent.record_id == row.record_id &&
             row.temporal->parent.total_tokens == row.total_tokens && row.temporal->parent.snapshot_id == page->snapshot_id &&

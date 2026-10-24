@@ -114,7 +114,7 @@ offset and fractional precision. A timestamp without a timezone remains usable
 for accounting and supplies no instant. Zero totals have no positive portion;
 incomplete categories do not change the turn's proved total.
 The established accounting dates, IDs and cumulative replay semantics remain
-unchanged. `usage-scan@2` publishes its original accounting without dated evidence.
+unchanged.
 
 Dated evidence lives in separate, independently versioned optional files. A
 stable native reparse must match the complete chosen accounting ledger; retained

@@ -8,9 +8,9 @@
 
 namespace grok {
 
-// One GiB is the adopted host candidate bound. Eight GiB bounds retained
-// generations, candidate copies, merge inputs/output, and source replacements.
-// Limits count the whole owned tree; history is never evicted to
+// One GiB is the adopted host candidate bound. Eight GiB bounds inherited
+// evidence, merge inputs/output, and source replacements in the candidate.
+// Limits count the candidate tree; history is never evicted to
 // make space. The runtime always uses these defaults; smaller limits let pure
 // filesystem fixtures exercise the same production admission checks.
 struct Usage_scan_limits
