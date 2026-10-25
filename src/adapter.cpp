@@ -1,11 +1,13 @@
 #include "grok_accounts.h"
 #include "grok_configuration.h"
 #include "grok_launcher.h"
+#include "grok_launcher_approval.h"
 #include "grok_lifecycle.h"
 #include "grok_preparation.h"
 #include "grok_probes.h"
 #include "grok_usage.h"
 #include "grok_wake.h"
+#include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <exception>
 namespace {
@@ -34,6 +36,10 @@ void invoke(addon::Invocation_context& context)
     try {
         const auto& capability = context.request().capability.capability_id;
         if (context.cancel_requested()) context.fail(addon::Result_status::CANCELLED, "cancelled");
+        else
+        if (capability == addon::k_launcher_approval_capability_id) {
+            addon::handle_launcher_approval(context, grok::launcher_approval_rules());
+        }
         else if (capability == "launcher-discovery") discovery(context);
         else if (capability == "accounts") grok::handle_accounts(context);
         else if (capability == "auth-status" || capability == "quota") grok::handle_probes(context);
@@ -57,6 +63,7 @@ int main()
     options.adapter_name = "grok-addon";
     options.adapter_version = "1.0.0";
     options.capabilities = {
+        {addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
         {"presentation", 1}, {"launcher-discovery", 1}, {"launch-preparation", 3},
         {"managed-configuration", 2}, {"profile-storage", 1}, {"accounts", 2},
         {"auth-status", 2}, {"quota", 2}, {"usage-scan", 3}, {"usage-temporal", 1},

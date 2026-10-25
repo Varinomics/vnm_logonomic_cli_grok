@@ -2,6 +2,7 @@
 #include "grok_accounts.h"
 #include "grok_preparation.h"
 #include "grok_launcher.h"
+#include "grok_launcher_approval.h"
 #include "grok_lifecycle.h"
 #include "grok_wake.h"
 #include <logonomic_cli_addon/json.h>
@@ -14,11 +15,82 @@
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/session_contracts.h>
 #include <stdexcept>
+#include <string>
 namespace addon = logonomic::cli_addon;
 void require(bool value, const char* message)
 {
     if (!value) throw std::runtime_error(message);
 }
+void launcher_approval_contract()
+{
+    const auto& rules = grok::launcher_approval_rules();
+    const auto yolo = addon::Launcher_approval_action::YOLOFY;
+    const auto undo = addon::Launcher_approval_action::UNYOLOFY;
+    const auto changed = addon::Launcher_approval_disposition::CHANGED;
+    const auto windows = addon::transform_launcher_approval({
+        {"grok", "powershell", ""}, "windows-x86_64", yolo}, rules);
+    require(windows.disposition == changed && windows.script_body == "grok --always-approve",
+        "discovered Windows Grok launcher supports Yolofy");
+    for (const auto* alias : {"--yolo", "--dangerously-skip-permissions"}) {
+        const auto result = addon::transform_launcher_approval({
+            {std::string("grok ") + alias, "direct", ""}, "linux-x86_64", yolo}, rules);
+        require(result.disposition == changed && result.script_body == "grok --always-approve",
+            "Grok aliases converge on its canonical approval argument");
+    }
+    const std::string mode_options =
+        R"args( --deny "Bash(rm *)" --rules "keep --permission-mode bypassPermissions")args";
+    const std::string configured = "grok" + mode_options;
+    const auto comparison = addon::launcher_approval_comparison_key(
+        {{configured, "direct", "PROFILE=work"}, "linux-x86_64"}, rules);
+    for (const auto* mode : {"--permission-mode bypassPermissions", "--permission-mode=bypassPermissions"}) {
+        const std::string source = std::string("grok ") + mode + mode_options;
+        const auto enabled = addon::transform_launcher_approval(
+            {{source, "direct", "PROFILE=work"}, "linux-x86_64", yolo}, rules);
+        require(enabled.disposition == changed && enabled.script_body == "grok --always-approve" + mode_options,
+            "Grok bypass permission mode normalizes while deny rules and instructions survive");
+        const auto repeated = addon::transform_launcher_approval(
+            {{enabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64", yolo}, rules);
+        require(repeated.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+            repeated.script_body == enabled.script_body, "Grok permission-mode normalization is idempotent");
+        const auto disabled = addon::transform_launcher_approval(
+            {{source, "direct", "PROFILE=work"}, "linux-x86_64", undo}, rules);
+        require(disabled.disposition == changed && disabled.script_body == configured,
+            "Unyolofy removes the Grok bypass permission mode without replacing policy");
+        const auto removed_again = addon::transform_launcher_approval(
+            {{disabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64", undo}, rules);
+        require(removed_again.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+            removed_again.script_body == configured, "Grok permission-mode removal is idempotent");
+        const auto mode_comparison = addon::launcher_approval_comparison_key(
+            {{source, "direct", "PROFILE=work"}, "linux-x86_64"}, rules);
+        require(comparison.supported && mode_comparison.supported && comparison.key == mode_comparison.key,
+            "Grok bypass permission modes retain the same rescan identity");
+    }
+    const std::string ordinary = "grok --permission-mode auto" + mode_options;
+    const auto preserve_mode = addon::transform_launcher_approval(
+        {{ordinary, "direct", ""}, "linux-x86_64", undo}, rules);
+    require(preserve_mode.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+        preserve_mode.script_body == ordinary, "Unyolofy preserves the user's non-bypass Grok permission mode");
+    const auto replace_mode = addon::transform_launcher_approval(
+        {{ordinary, "direct", ""}, "linux-x86_64", yolo}, rules);
+    require(replace_mode.disposition == changed && replace_mode.script_body == "grok --always-approve" + mode_options,
+        "Yolofy replaces an understood Grok permission mode without changing rules");
+    const std::string policy = R"args(--deny "Bash(rm *)" --rules "keep --yolo as text")args";
+    const auto removed = addon::transform_launcher_approval({
+        {"grok --always-approve --yolo --dangerously-skip-permissions " + policy, "direct", ""},
+        "linux-x86_64", undo}, rules);
+    require(removed.disposition == changed && removed.script_body == "grok " + policy,
+        "Grok deny rules and instructions survive removal of every bypass alias");
+    const std::string prompt = R"(grok -p "--always-approve")";
+    const auto literal = addon::transform_launcher_approval({
+        {prompt, "direct", ""}, "linux-x86_64", undo}, rules);
+    require(literal.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+        literal.script_body == prompt, "Grok headless prompt values are not approval flags");
+    const auto management = addon::transform_launcher_approval({
+        {"grok login", "direct", ""}, "linux-x86_64", yolo}, rules);
+    require(management.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,
+        "Grok account management remains unchanged");
+}
+
 addon::Classify_event_request event(std::string name)
 {
     addon::Classify_event_request request;
@@ -55,6 +127,7 @@ int main(int argc, char** argv)
         std::cout << "Grok Build --session-id --resume\n"; return 0;
     }
     try {
+        launcher_approval_contract();
         require(grok::wake_compatible_arguments({"--model", "grok-4.6", "--effort=high"}),
             "native model options rejected by wake launch");
         require(grok::wake_compatible_arguments({"--resume", "8e18215e-f612-4131-95dd-7890139a41ae"}),

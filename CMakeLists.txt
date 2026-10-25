@@ -54,6 +54,7 @@ add_library(grok_provider STATIC
     src/grok_accounts.cpp
     src/grok_acp.cpp
     src/grok_launcher.cpp
+    src/grok_launcher_approval.cpp
     src/grok_configuration.cpp
     src/grok_lifecycle.cpp
     src/grok_preparation.cpp
