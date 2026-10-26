@@ -56,6 +56,7 @@ add_library(grok_provider STATIC
     src/grok_launcher.cpp
     src/grok_launcher_approval.cpp
     src/grok_configuration.cpp
+    src/grok_context.cpp
     src/grok_lifecycle.cpp
     src/grok_preparation.cpp
     src/grok_probes.cpp
@@ -113,7 +114,7 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
     return()
 endif()
 enable_testing()
-foreach(test_name IN ITEMS grok_runtime_tests grok_acp_tests grok_probe_tests grok_usage_tests grok_wake_protocol_tests grok_wake_identity_tests)
+foreach(test_name IN ITEMS grok_runtime_tests grok_acp_tests grok_probe_tests grok_usage_tests grok_wake_protocol_tests grok_wake_identity_tests grok_context_tests)
     add_executable(${test_name} "tests/${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE grok_provider)
     grok_target(${test_name})
@@ -175,8 +176,10 @@ set_tests_properties(grok_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage
 
 add_executable(grok_fake_vnmctl tests/grok_fake_vnmctl.cpp)
 grok_target(grok_fake_vnmctl)
+add_dependencies(grok_fake_vnmctl grok_package)
 add_test(NAME grok_helper_gate_tests COMMAND "${CMAKE_COMMAND}"
-    "-DHELPER=$<TARGET_FILE:grok_helper>" "-DVNMCTL=$<TARGET_FILE:grok_fake_vnmctl>"
+    "-DHELPER=${GROK_PACKAGE_DIRECTORY}/helpers/grok_helper${CMAKE_EXECUTABLE_SUFFIX}"
+    "-DVNMCTL=$<TARGET_FILE:grok_fake_vnmctl>"
     "-DWORK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/helper-gate-fixture"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/grok_helper_gate_tests.cmake")
 set_tests_properties(grok_helper_gate_tests PROPERTIES TIMEOUT 15)

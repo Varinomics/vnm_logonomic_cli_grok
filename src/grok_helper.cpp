@@ -43,6 +43,7 @@ int main()
     std::string name;
     for (const auto& pair : {std::pair{"session_start", "SessionStart"}, {"session_end", "SessionEnd"},
              {"user_prompt_submit", "UserPromptSubmit"}, {"pre_tool_use", "PreToolUse"},
+             {"post_tool_use", "PostToolUse"}, {"post_compact", "PostCompact"},
              {"stop", "Stop"}, {"stop_failure", "StopFailure"}, {"stop_cancelled", "StopCancelled"},
              {"permission_denied", "PermissionDenied"}, {"subagent_start", "SubagentStart"},
              {"subagent_stop", "SubagentStop"}}) {
@@ -52,9 +53,14 @@ int main()
     addon::Helper_client client(*environment, cancelled);
     auto body = addon::Json_value::object();
     for (const auto field : {"hook_event_name", "sessionId", "promptId", "source",
-             "subagentType", "subagentId", "phase", "reason"}) {
+             "subagentType", "subagentId", "phase", "reason", "timestamp"}) {
         if (const auto* value = event->find(field); value && value->is_string() && value->as_string().size() <= 768)
             body.set(field, *value);
+    }
+    if (const auto* pointer = event->find("transcriptPath");
+        pointer && pointer->is_string() && pointer->as_string().size() <= 8192)
+    {
+        body.set("transcriptPath", *pointer);
     }
     // Prompt gates cannot supply model context in this native CLI. PreToolUse
     // can, and remains its real event name throughout authenticated admission.

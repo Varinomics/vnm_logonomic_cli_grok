@@ -1,4 +1,5 @@
 #include "grok_lifecycle.h"
+#include "grok_context.h"
 
 #include <logonomic_cli_addon/limits.h>
 
@@ -42,12 +43,20 @@ std::optional<addon::Classify_event_result> classify_hook(const addon::Classify_
         return std::nullopt;
     }
     addon::Classify_event_result result;
-    constexpr std::array<std::string_view, 5> supported{
-        "SessionStart", "SessionEnd", "UserPromptSubmit", "StopFailure", "StopCancelled"};
+    constexpr std::array<std::string_view, 8> supported{
+        "SessionStart", "SessionEnd", "UserPromptSubmit", "StopFailure", "StopCancelled",
+        "Stop", "PostToolUse", "PostCompact"};
     if (std::find(supported.begin(), supported.end(), *name) == supported.end()) return result;
     if (metadata(body, "subagentType")) return result;
     const auto session = metadata(body, "sessionId");
     if (!session) return std::nullopt;
+    if (request.context_failure) {
+        result.context_failure = addon::Context_failure{*session, *request.context_failure};
+    }
+    add_hook_context(request, *session, result);
+    if (*name == "Stop" || *name == "PostToolUse" || *name == "PostCompact") {
+        return result;
+    }
     addon::Lifecycle_observation observation;
     observation.provider_event_name = *name;
     observation.provider_session_id = *session;

@@ -27,7 +27,7 @@ std::string hook_configuration()
 #endif
     auto hooks = addon::Json_value::object();
     for (const std::string event : {"SessionStart", "SessionEnd", "UserPromptSubmit",
-             "PreToolUse", "StopFailure", "StopCancelled"}) {
+             "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact"}) {
         auto handler = addon::Json_value::object();
         handler.set("type", addon::Json_value("command"));
         handler.set("command", addon::Json_value(command));
