@@ -83,6 +83,9 @@ grok_target(grok_launch_bridge)
 add_executable(grok_session_bridge src/grok_session_bridge.cpp)
 target_link_libraries(grok_session_bridge PRIVATE grok_provider)
 grok_target(grok_session_bridge)
+if(MINGW)
+    target_link_options(grok_session_bridge PRIVATE -municode)
+endif()
 add_executable(grok_quota_bridge
     src/grok_billing.cpp
     src/grok_billing_http.cpp
