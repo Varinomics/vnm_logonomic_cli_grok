@@ -197,8 +197,8 @@ void credential_parsing()
         "a team principal is not read as the user's own quota");
 
     write_file(profile.path() / "auth.json", std::string(64 * 1024 + 1, ' '));
-    check(state_of(fetch(profile)) == Quota_status::UNAVAILABLE && g_service.requests.empty(),
-        "an auth.json beyond its bound is not read");
+    check(state_of(fetch(profile)) == Quota_status::FAILED && g_service.requests.empty(),
+        "an auth.json beyond its bound fails the refresh without sending a request");
 
     write_file(profile.path() / "auth.json", auth_json(Clock::now() - std::chrono::minutes(1)));
     check(state_of(fetch(profile)) == Quota_status::FAILED && g_service.requests.empty(),

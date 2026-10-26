@@ -150,12 +150,11 @@ std::optional<std::chrono::sys_time<std::chrono::milliseconds>> timestamp(
         minutes(offset_minutes) + milliseconds(fraction_ms);
 }
 
-std::optional<Credential> read_credential(const fs::path& profile)
+std::optional<Credential> parse_credential(const addon::Json_value& auth)
 {
-    const auto auth = read_json(profile / "auth.json", 64 * 1024);
-    if (!auth || !auth->is_object()) return std::nullopt;
+    if (!auth.is_object()) return std::nullopt;
     constexpr std::string_view scope = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
-    const auto* entry = auth->find(scope);
+    const auto* entry = auth.find(scope);
     if (!entry || !entry->is_object()) return std::nullopt;
     const auto& bearer = member(*entry, "key");
     const auto& user_id = member(*entry, "user_id");
@@ -248,7 +247,11 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     std::error_code file_error;
     if (!fs::exists(profile / "auth.json", file_error))
         return status(file_error ? Quota_status::FAILED : Quota_status::NOT_LOGGED_IN);
-    const auto credential = read_credential(profile);
+    const auto auth = read_json(profile / "auth.json", 64 * 1024);
+    if (!auth) {
+        return status(Quota_status::FAILED);
+    }
+    const auto credential = parse_credential(*auth);
     if (!credential) return status(Quota_status::UNAVAILABLE);
     // An expired access token is not refreshed here. Grok rotates its refresh
     // token under its own auth.json lock, and a second refresher would spend a
@@ -331,7 +334,8 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     if (!percent) return status(Quota_status::UNAVAILABLE);
     // The figures belong to the credential that fetched them. If Grok replaced
     // it meanwhile, the next refresh reads the current one.
-    const auto current_credential = read_credential(profile);
+    const auto current_auth = read_json(profile / "auth.json", 64 * 1024);
+    const auto current_credential = current_auth ? parse_credential(*current_auth) : std::nullopt;
     if (!current_credential || current_credential->scope_key != credential->scope_key ||
         current_credential->bearer != credential->bearer ||
         current_credential->user_id != credential->user_id ||
