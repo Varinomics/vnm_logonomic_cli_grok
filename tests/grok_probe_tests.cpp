@@ -188,6 +188,8 @@ void quota_is_read_by_the_packaged_helper()
     result.observation->primary->window_minutes = 7 * 24 * 60;
     result.observation->primary->resets_at_ms   = 1'790'000'000'000;
     result.observation->plan = "SuperGrok";
+    std::optional<std::string> retained_failure;
+    std::optional<addon::Quota_diagnostic> retained_diagnostic;
     const auto inspect = [&](const std::string& output) {
         request.inspection.stdout_bytes = output;
         Context context;
@@ -202,6 +204,8 @@ void quota_is_read_by_the_packaged_helper()
             decoded->observation->scope.source_account_key == prepare.context.account_context->adapter_account_key &&
             decoded->observation->scope.observed_at_ms > 0 && decoded->observation->scope.fresh_for_ms == 0,
             "the adapter stamps the selected account and the observation time");
+        retained_failure = decoded->failure_reason;
+        retained_diagnostic = decoded->diagnostic;
         return *decoded->observation;
     };
     const auto ready = inspect(addon::serialize_json(addon::encode_quota_inspect_result(result, 2)) + '\n');
@@ -209,13 +213,52 @@ void quota_is_read_by_the_packaged_helper()
         ready.primary->window_minutes == result.observation->primary->window_minutes &&
         ready.primary->resets_at_ms == result.observation->primary->resets_at_ms && ready.plan == "SuperGrok",
         "the helper's figures reach the host unchanged");
+    const auto unexplained = addon::make_quota_failure(addon::Quota_failure::REQUEST_REJECTED, {},
+        addon::Quota_diagnostic{addon::Quota_failure_stage::HTTP_RESPONSE, 503});
+    check(inspect(addon::serialize_json(addon::encode_quota_inspect_result(unexplained, 2, true))).state ==
+        addon::Quota_status::FAILED && !retained_failure && !retained_diagnostic,
+        "a host that did not ask for the cause receives a neutral failure");
+    request.report_quota_failure = true;
+    for (const auto& [reason, status] : {
+            std::pair{addon::Quota_failure::INVALID_RESPONSE, 200},
+            std::pair{addon::Quota_failure::AUTHENTICATION_REQUIRED, 401},
+            std::pair{addon::Quota_failure::REQUEST_REJECTED, 503}})
+    {
+        const auto failed = addon::make_quota_failure(reason, {},
+            addon::Quota_diagnostic{addon::Quota_failure_stage::HTTP_RESPONSE, status});
+        check(inspect(addon::serialize_json(addon::encode_quota_inspect_result(failed, 2, true))).state ==
+            addon::Quota_status::FAILED && retained_failure == failed.failure_reason &&
+            retained_diagnostic && retained_diagnostic->code == status &&
+            retained_diagnostic->stage == addon::Quota_failure_stage::HTTP_RESPONSE,
+            "the adapter carries the helper's safe failure and developer diagnostic to the host");
+    }
     check(inspect("").state == addon::Quota_status::FAILED, "a helper that wrote no result failed the attempt");
+    const bool invalid_reply =
+        retained_failure == addon::quota_failure_reason(addon::Quota_failure::INVALID_RESPONSE) &&
+        !retained_diagnostic;
+    if (!invalid_reply) {
+        std::cerr << "Missing invalid-response cause for empty helper output\n";
+    }
     request.inspection.exit_code = 1;
     check(inspect(addon::serialize_json(addon::encode_quota_inspect_result(result, 2))).state ==
         addon::Quota_status::FAILED, "a helper that exited with an error failed the attempt");
+    const bool process_failed =
+        retained_failure == addon::quota_failure_reason(addon::Quota_failure::PROCESS_FAILED) &&
+        retained_diagnostic && retained_diagnostic->stage == addon::Quota_failure_stage::PROCESS_EXIT &&
+        retained_diagnostic->code == 1;
+    if (!process_failed) {
+        std::cerr << "Missing process-failure cause and native exit diagnostic\n";
+    }
     request.inspection.exit_code = 0;
     request.inspection.timed_out = true;
     check(inspect("").state == addon::Quota_status::FAILED, "a helper that timed out failed the attempt");
+    const bool timed_out = retained_failure == addon::quota_failure_reason(addon::Quota_failure::TIMED_OUT) &&
+        !retained_diagnostic;
+    if (!timed_out) {
+        std::cerr << "Missing timeout cause or invented native exit diagnostic\n";
+    }
+    check(invalid_reply && process_failed && timed_out,
+        "the host can distinguish an invalid helper reply, a failed process and a timeout");
 }
 void accounts_are_named_after_their_profile_folders()
 {

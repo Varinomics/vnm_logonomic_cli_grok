@@ -130,19 +130,24 @@ void handle_probes(addon::Invocation_context& context)
         context.fail(addon::Result_status::FAILED, "invalid_quota_bridge_state");
         return;
     }
-    // A helper that timed out, failed or wrote no result is a failed
-    // observation; the host adds its own timeout diagnostic.
     const auto wire = addon::parse_json(trimmed(request->inspection.stdout_bytes), {}, nullptr);
     auto decoded = wire && !request->inspection.timed_out && request->inspection.exit_code == 0
         ? addon::decode_quota_inspect_result(*wire, true, &failure, 2) : std::nullopt;
     if (!decoded || !decoded->complete || !decoded->observation) {
-        decoded = addon::Quota_inspect_result{};
-        decoded->complete = true;
-        decoded->observation = addon::Quota_observation{};
-        decoded->observation->state = addon::Quota_status::FAILED;
+        if (request->inspection.timed_out) {
+            decoded = addon::make_quota_failure(addon::Quota_failure::TIMED_OUT);
+        }
+        else
+        if (request->inspection.exit_code != 0) {
+            decoded = addon::make_quota_failure(addon::Quota_failure::PROCESS_FAILED, {},
+                addon::Quota_diagnostic{addon::Quota_failure_stage::PROCESS_EXIT, request->inspection.exit_code});
+        }
+        else {
+            decoded = addon::make_quota_failure(addon::Quota_failure::INVALID_RESPONSE);
+        }
     }
     decoded->observation->scope = scope(*request);
-    context.succeed(addon::encode_quota_inspect_result(*decoded, 2));
+    context.succeed(addon::encode_quota_inspect_result(*decoded, 2, request->report_quota_failure));
 }
 
 } // namespace grok

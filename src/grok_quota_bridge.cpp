@@ -46,7 +46,7 @@ int run()
     const auto profile = selected_profile();
     if (!profile) return 1;
     const auto result = grok::fetch_billing_quota(*profile);
-    const auto output = addon::serialize_json(addon::encode_quota_inspect_result(result, 2)) + '\n';
+    const auto output = addon::serialize_json(addon::encode_quota_inspect_result(result, 2, true)) + '\n';
     return std::fwrite(output.data(), 1, output.size(), stdout) == output.size() &&
         std::fflush(stdout) == 0 ? 0 : 1;
 }
