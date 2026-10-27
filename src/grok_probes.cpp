@@ -147,7 +147,7 @@ void handle_probes(addon::Invocation_context& context)
         }
     }
     decoded->observation->scope = scope(*request);
-    context.succeed(addon::encode_quota_inspect_result(*decoded, 2));
+    context.succeed(addon::encode_quota_inspect_result(*decoded, 2, request->report_quota_failure));
 }
 
 } // namespace grok

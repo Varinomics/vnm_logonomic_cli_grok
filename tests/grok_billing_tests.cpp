@@ -190,7 +190,7 @@ void failure_causes()
             "a failed billing request retains its established safe cause");
         addon::Contract_failure failure;
         const auto decoded = addon::decode_quota_inspect_result(
-            addon::encode_quota_inspect_result(result, 2), true, &failure, 2);
+            addon::encode_quota_inspect_result(result, 2, true), true, &failure, 2);
         check(decoded && decoded->failure_reason == result.failure_reason,
             "the helper wire result preserves the safe cause");
         if (g_service.billing) {

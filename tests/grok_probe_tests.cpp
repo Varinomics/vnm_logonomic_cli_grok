@@ -213,6 +213,12 @@ void quota_is_read_by_the_packaged_helper()
         ready.primary->window_minutes == result.observation->primary->window_minutes &&
         ready.primary->resets_at_ms == result.observation->primary->resets_at_ms && ready.plan == "SuperGrok",
         "the helper's figures reach the host unchanged");
+    const auto unexplained = addon::make_quota_failure(addon::Quota_failure::REQUEST_REJECTED, {},
+        addon::Quota_diagnostic{addon::Quota_failure_stage::HTTP_RESPONSE, 503});
+    check(inspect(addon::serialize_json(addon::encode_quota_inspect_result(unexplained, 2, true))).state ==
+        addon::Quota_status::FAILED && !retained_failure && !retained_diagnostic,
+        "a host that did not ask for the cause receives a neutral failure");
+    request.report_quota_failure = true;
     for (const auto& [reason, status] : {
             std::pair{addon::Quota_failure::INVALID_RESPONSE, 200},
             std::pair{addon::Quota_failure::AUTHENTICATION_REQUIRED, 401},
@@ -220,7 +226,7 @@ void quota_is_read_by_the_packaged_helper()
     {
         const auto failed = addon::make_quota_failure(reason, {},
             addon::Quota_diagnostic{addon::Quota_failure_stage::HTTP_RESPONSE, status});
-        check(inspect(addon::serialize_json(addon::encode_quota_inspect_result(failed, 2))).state ==
+        check(inspect(addon::serialize_json(addon::encode_quota_inspect_result(failed, 2, true))).state ==
             addon::Quota_status::FAILED && retained_failure == failed.failure_reason &&
             retained_diagnostic && retained_diagnostic->code == status &&
             retained_diagnostic->stage == addon::Quota_failure_stage::HTTP_RESPONSE,
