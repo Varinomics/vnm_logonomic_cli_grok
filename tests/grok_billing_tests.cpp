@@ -178,6 +178,56 @@ bool decodes_as_quota_2(const addon::Quota_inspect_result& result)
         .has_value();
 }
 
+void failure_causes()
+{
+    Profile profile;
+    write_file(profile.path() / "auth.json", auth_json(Clock::now() + std::chrono::hours(1)));
+    g_service.settings = settings_tier("SuperGrok");
+    const auto reason = [&](std::optional<grok::Billing_http_response> response) {
+        g_service.billing = std::move(response);
+        const auto result = fetch(profile);
+        check(state_of(result) == Quota_status::FAILED && result.failure_reason.has_value(),
+            "a failed billing request retains its established safe cause");
+        addon::Contract_failure failure;
+        const auto decoded = addon::decode_quota_inspect_result(
+            addon::encode_quota_inspect_result(result, 2), true, &failure, 2);
+        check(decoded && decoded->failure_reason == result.failure_reason,
+            "the helper wire result preserves the safe cause");
+        if (g_service.billing) {
+            check(result.diagnostic && decoded->diagnostic &&
+                decoded->diagnostic->stage == addon::Quota_failure_stage::HTTP_RESPONSE &&
+                decoded->diagnostic->code == g_service.billing->status,
+                "the helper retains the actual HTTP status in its developer diagnostic");
+        }
+        else {
+            check(!decoded->diagnostic, "a transport failure does not invent an HTTP status");
+        }
+        return *result.failure_reason;
+    };
+    const auto malformed = reason(ok("<html>private response</html>"));
+    const auto transport = reason(std::nullopt);
+    const auto rejected  = reason(grok::Billing_http_response{503, "private service error"});
+    const auto denied    = reason(grok::Billing_http_response{401, "private authentication error"});
+    check(malformed != transport && malformed != rejected && malformed != denied &&
+        transport != rejected && transport != denied && rejected != denied,
+        "malformed data, transport failure, rejection and authentication remain distinct");
+    check(malformed == addon::quota_failure_reason(addon::Quota_failure::INVALID_RESPONSE) &&
+        denied == addon::quota_failure_reason(addon::Quota_failure::AUTHENTICATION_REQUIRED),
+        "malformed quota data is not reported as an authentication failure");
+    check(reason(grok::Billing_http_response{429, "private throttling error"}) == rejected,
+        "service rejection remains distinct from authentication");
+    check(malformed.find("private") == std::string::npos &&
+        rejected.find("private") == std::string::npos && denied.find("private") == std::string::npos,
+        "native response contents do not cross the safe cause boundary");
+    write_file(profile.path() / "auth.json", auth_json(Clock::now() - std::chrono::minutes(1)));
+    const auto expired = fetch(profile);
+    check(expired.failure_reason && *expired.failure_reason != malformed &&
+        *expired.failure_reason != transport && *expired.failure_reason != rejected && g_service.requests.empty(),
+        "expired credentials retain their prerequisite failure without contacting billing");
+    check(expired.failure_reason == addon::quota_failure_reason(addon::Quota_failure::CREDENTIALS_EXPIRED),
+        "the caller knows that Grok must renew its expired credential");
+}
+
 void credential_parsing()
 {
     Profile profile;
@@ -464,6 +514,7 @@ std::optional<Billing_http_response> get_billing_resource(
 int main()
 {
     try {
+        failure_causes();
         credential_parsing();
         response_interpretation();
         native_fractional_weekly_period();
