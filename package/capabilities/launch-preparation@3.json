@@ -4,6 +4,7 @@
   "payload": {
     "environment_names": [
       "GROK_HOME",
+      "GROK_SANDBOX",
       "GROK_AUTH_PATH",
       "HOME",
       "USERPROFILE",
@@ -13,6 +14,7 @@
       "WINDIR",
       "TEMP",
       "TMP",
+      "TMPDIR",
       "XAI_API_KEY",
       "GROK_API_KEY",
       "GROK_AUTH_PROVIDER_COMMAND",

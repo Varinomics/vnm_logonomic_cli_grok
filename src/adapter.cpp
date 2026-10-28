@@ -64,6 +64,7 @@ int main()
     options.adapter_version = "1.0.0";
     options.capabilities = {
         {addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
+        {addon::k_interactive_initial_prompt_capability_id, addon::k_interactive_initial_prompt_version},
         {"presentation", 1}, {"launcher-discovery", 1}, {"launch-preparation", 3},
         {"managed-configuration", 2}, {"profile-storage", 1}, {"accounts", 2},
         {"auth-status", 2}, {"quota", 2}, {"usage-scan", 3}, {"usage-temporal", 1},

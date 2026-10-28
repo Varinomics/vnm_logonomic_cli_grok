@@ -19,7 +19,7 @@ void check(bool condition, const std::string& message)
 int main(int argc, char** argv)
 {
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
-        std::cout << "Grok --session-id --resume --leader-socket\n";
+        std::cout << "Usage: grok [OPTIONS] [PROMPT] [COMMAND]\nGrok --session-id --resume --leader-socket\n";
         return 0;
     }
     if (argc != 2) return 2;
@@ -73,6 +73,21 @@ int main(int argc, char** argv)
             (*patch->argv)[4] == "--model" && (*patch->argv)[5] == "grok-4.6", "native argument/profile preparation changed");
         check(patch->account_context && addon::encode_account_context(*patch->account_context) ==
             addon::encode_account_context(*prepare.account_context), "selected account echo changed");
+
+        auto continuation = prepare;
+        continuation.initial_prompt = addon::Initial_prompt_request{
+            "Logonomic continuation: read the earlier session's brief before proceeding.",
+            addon::path_to_utf8(directory / "brief.md")};
+        const auto continued = addon::decode_launch_patch(invoke({"launch-preparation", 3}, "prepare",
+            addon::encode_prepare_request(continuation, 3)), &failure, 3);
+        check(continued && continued->session_wake && continued->session_wake->available && continued->argv &&
+            continued->argv->size() == patch->argv->size() + 2 &&
+            addon::validate_initial_prompt_acknowledgment(continuation.initial_prompt, *continued, &failure),
+            "packaged initial-prompt preparation lost the wake bridge or its acknowledgment");
+        check((*continued->argv)[continued->argv->size() - 2] == "--" &&
+            continued->argv->back() == continuation.initial_prompt->text &&
+            std::count(continued->argv->begin(), continued->argv->end(), continuation.initial_prompt->text) == 1,
+            "packaged wake bridge did not retain the exact single native first message");
 
         addon::Session_wake_target target;
         target.provider_session_id = "8e18215e-f612-4131-95dd-7890139a41ae";
