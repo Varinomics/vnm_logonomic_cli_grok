@@ -1,5 +1,6 @@
 #include "grok_lifecycle.h"
 #include "grok_context.h"
+#include "grok_json.h"
 
 #include <logonomic_cli_addon/limits.h>
 
@@ -13,6 +14,7 @@ namespace grok {
 namespace {
 
 namespace addon = logonomic::cli_addon;
+namespace json = addon::json;
 
 std::optional<std::string> metadata(const addon::Json_value& body, std::string_view key,
     std::size_t bound = addon::limits::k_max_lifecycle_identity_bytes)
@@ -33,10 +35,63 @@ std::optional<std::string> metadata(const addon::Json_value& body, std::string_v
     return result;
 }
 
+std::optional<std::string> interaction_kind(const addon::Json_value& body)
+{
+    const auto kind = json::text(json::member(body, "update"), "kind");
+    if (kind == "permission" || kind == "plan_approval") return "permission";
+    if (kind == "question" || kind == "mcp_elicitation") return "interactive_question";
+    return std::nullopt;
+}
+
+std::optional<addon::Classify_event_result> classify_interaction(const addon::Classify_event_request& request)
+{
+    const auto& body = request.event.body;
+    const auto& update = json::member(body, "update");
+    const auto session = json::text(body, "sessionId");
+    const auto call_id = json::text(update, "tool_call_id");
+    const auto id = interaction_request_identity(json::member(body, "request_id"));
+    const auto pending = request.event.name == "pending_interaction";
+    const auto valid_identity = [](const std::string& value) {
+        return !value.empty() && value.size() <= addon::limits::k_max_lifecycle_identity_bytes &&
+            value.find_first_of(std::string_view("\0\r\n", 3)) == std::string::npos;
+    };
+    if (!valid_identity(session) || !valid_identity(call_id) || !id ||
+        json::text(update, "sessionUpdate") != request.event.name || (pending && !interaction_kind(body))) return std::nullopt;
+    addon::Classify_event_result result;
+    if (!request.ledger.current_transition || request.ledger.current_transition->provider_session_id != session ||
+        request.ledger.current_transition->nonce != request.transition_nonce) return result;
+    addon::Lifecycle_observation observation;
+    observation.provider_event_name = request.event.name;
+    observation.provider_session_id = session;
+    observation.attention_request_id = *id;
+    observation.attention_transition = pending ? addon::Attention_transition::REQUESTED : addon::Attention_transition::RESOLVED;
+    observation.attention_evidence = addon::Evidence::CONFIRMED;
+    result.classification = addon::Classification::EVENT;
+    result.observations.push_back(std::move(observation));
+    return result;
+}
+
 } // namespace
+
+std::optional<std::string> interaction_request_identity(const addon::Json_value& request_id)
+{
+    if (!request_id.is_integer() && !json::bounded_string(request_id, addon::limits::k_max_lifecycle_identity_bytes)) {
+        return std::nullopt;
+    }
+    // JSON encoding preserves the native RPC identity's string/integer type.
+    // A tool-call ID alone can name several successive human waits.
+    const auto identity = addon::serialize_json(request_id);
+    if (identity.size() > addon::limits::k_max_lifecycle_identity_bytes) {
+        return std::nullopt;
+    }
+    return identity;
+}
 
 std::optional<addon::Classify_event_result> classify_hook(const addon::Classify_event_request& request)
 {
+    if (request.event.name == "pending_interaction" || request.event.name == "interaction_resolved") {
+        return classify_interaction(request);
+    }
     const auto& body = request.event.body;
     const auto name = metadata(body, "hook_event_name");
     if (!name || *name != request.event.name) {
@@ -98,7 +153,12 @@ void handle_lifecycle(addon::Invocation_context& context)
         return;
     }
     addon::Contract_failure failure;
-    const auto request = addon::decode_classify_event_request(context.request().payload, &failure);
+    const bool typed = context.request().capability.capability_id == addon::k_attention_kind_capability_id;
+    const auto attention_request = typed
+        ? addon::decode_attention_classification_request(context.request().payload, &failure) : std::nullopt;
+    const auto request = typed
+        ? (attention_request ? std::optional(attention_request->base) : std::nullopt)
+        : addon::decode_classify_event_request(context.request().payload, &failure);
     if (!request) {
         context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
@@ -108,7 +168,14 @@ void handle_lifecycle(addon::Invocation_context& context)
         context.fail(addon::Result_status::FAILED, "invalid_provider_event");
         return;
     }
-    context.succeed(addon::encode_classify_event_result(*result));
+    if (typed) {
+        addon::Attention_classification_result attention{*result, std::nullopt};
+        if (request->event.name == "pending_interaction" && result->observations.size() == 1) {
+            attention.attention_kind = addon::Attention_kind{0, *interaction_kind(request->event.body)};
+        }
+        context.succeed(addon::encode_attention_classification_result(attention));
+    }
+    else context.succeed(addon::encode_classify_event_result(*result));
 }
 
 } // namespace grok

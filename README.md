@@ -48,6 +48,21 @@ question, or elicitation requests, and never loads or replaces a conversation.
 The selected profile, launch environment and managed hooks are inherited by the
 private leader. Existing launches without this preparation cannot be woken.
 
+After a mailbox wake has subscribed that existing control connection, native
+pending/resolved notifications and the matching interactive RPCs report root-session
+permissions, questions, plan approvals and MCP elicitation. Each wait retains its
+native RPC request ID, so successive waits for one tool call remain distinct. A
+permission guard resolved by automatic policy does not establish attention. Optional
+`attention-kind@1` distinguishes permission from interactive-question attention.
+Observation issues no subscription or response requests. Original-TUI prompts
+before the first wake, startup/trust prompts, child sessions and standalone
+launches remain outside this coverage. A new session epoch requires another
+wake before observation resumes. Lost notifications or a lost control connection
+cannot be reconciled: Grok needs a non-driving observer role and a read-only
+pending-interaction snapshot for complete startup and reconnect coverage. Loss
+does not fabricate a resolution; admitted pending attention can remain until a
+native resolution or host session transition clears it.
+
 Wake requires the authenticated current-launch SessionStart identity and its
 exact host transition nonce, followed by an unscoped native roster check. A
 resume of the same native UUID must still match the new transition nonce.
