@@ -4,11 +4,27 @@
 #include "grok_launcher.h"
 #include "grok_wake.h"
 #include <logonomic_cli_addon/launch_preparation.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
+#include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#ifndef _WIN32
+#include <pwd.h>
+#include <unistd.h>
+#endif
 #include <algorithm>
+#include <cerrno>
+#include <filesystem>
+#include <optional>
 #include <regex>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 namespace grok {
 namespace addon = logonomic::cli_addon;
+namespace fs = std::filesystem;
 namespace {
 bool environment_name_equal(std::string_view left, std::string_view right)
 {
@@ -23,15 +39,19 @@ bool environment_name_equal(std::string_view left, std::string_view right)
     }
     return true;
 }
-bool interactive_arguments(const std::vector<std::string>& arguments)
+bool interactive_arguments(const std::vector<std::string>& arguments, bool fresh_session = false)
 {
     // A subcommand or single-shot request has a different lifetime and output
     // contract. Preserve all native interactive option values verbatim.
-    const std::vector<std::string> values{
+    std::vector<std::string> values{
         "--model", "-m", "--cwd", "--rules", "--append-system-prompt", "--system-prompt",
         "--resume", "-r", "--load", "--session-id", "-s", "--agent", "--agents",
         "--allow", "--deny", "--allowedTools", "--disallowedTools", "--permission-mode",
         "--reasoning-effort", "--effort", "--profile", "--debug-file", "--leader-socket"};
+    if (fresh_session) {
+        values.insert(values.end(), {"--system-prompt-override", "--sandbox", "--worktree", "-w",
+            "--worktree-ref", "--ref", "--add-dir"});
+    }
     for (std::size_t i = 0; i < arguments.size(); ++i) {
         const auto& argument = arguments[i];
         const auto option = argument.substr(0, argument.find('='));
@@ -39,15 +59,232 @@ bool interactive_arguments(const std::vector<std::string>& arguments)
             option == "--prompt-file" || option == "--prompt-json" || option == "--version" ||
             option == "--help" || option == "-h" || option == "-v" || option == "-V" ||
             option == "--leader" || argument.empty() || argument[0] != '-') return false;
+        if (fresh_session &&
+            (option == "--resume" || option == "-r" || option == "--load" ||
+                option == "--continue" || option == "-c" || option == "--fork-session"))
+        {
+            return false;
+        }
         if (std::find(values.begin(), values.end(), option) != values.end() && argument.find('=') == std::string::npos) {
             if (i + 1 == arguments.size() || arguments[i + 1].starts_with('-')) {
-                if (option == "--resume" || option == "-r") continue;
+                if (option == "--resume" || option == "-r" ||
+                    (fresh_session && (option == "--worktree" || option == "-w"))) continue;
                 return false;
             }
             ++i;
         }
     }
     return true;
+}
+
+bool verbatim_initial_prompt(std::string_view text)
+{
+    // The TUI's positional prompt is trimmed before its ordinary SendPrompt
+    // dispatch. --verbatim belongs to the headless path and cannot bypass it.
+    if (addon::trim(text) != text || text.starts_with('/')) {
+        return false;
+    }
+    const auto folded = addon::lower(std::string(text));
+    for (const auto* alias : {"exit", "quit", ":q", ":q!", ":wq", ":wq!"}) {
+        if (folded == alias) {
+            return false;
+        }
+    }
+    // The request excludes ASCII controls, leaving space as the only native
+    // pre-slash whitespace. Tokens end at Unicode whitespace. Absolute paths
+    // remain ordinary text; these complete tokens hoist or refuse submission.
+    for (const std::string_view token : {" /btw", " /goal"}) {
+        for (auto position = text.find(token); position != std::string_view::npos;
+             position = text.find(token, position + token.size()))
+        {
+            const auto suffix = text.substr(position + token.size());
+            if (suffix.empty() || addon::trim(suffix) != suffix) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::optional<std::string_view> native_option_value(
+    const std::vector<std::string>& arguments, std::string_view name)
+{
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const std::string_view argument = arguments[index];
+        const auto separator           = argument.find('=');
+        if (argument.substr(0, separator) != name) {
+            continue;
+        }
+        if (separator != std::string_view::npos) {
+            return argument.substr(separator + 1);
+        }
+        if (index + 1 < arguments.size()) {
+            return arguments[index + 1];
+        }
+    }
+    return std::nullopt;
+}
+
+bool authored_environment_name(const addon::Launcher_request& launcher, const Launcher_command& command,
+    std::string_view name)
+{
+    if (std::find(command.environment_names.begin(), command.environment_names.end(), name) !=
+        command.environment_names.end())
+    {
+        return true;
+    }
+    std::istringstream lines(launcher.environment_text);
+    for (std::string line; std::getline(lines, line);) {
+        const auto assignment = addon::environment_assignment(line, addon::Launcher_whitespace::ASCII);
+        if (assignment && assignment->first == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fs::path native_home(const Environment& environment)
+{
+    const auto home = addon::environment_value(environment, "HOME");
+    if (!home.empty()) {
+        return addon::path_from_utf8(home);
+    }
+#ifndef _WIN32
+    // Rust's home_dir uses the current user's passwd entry when HOME is empty.
+    const auto hint = sysconf(_SC_GETPW_R_SIZE_MAX);
+    std::vector<char> buffer(hint > 0 ? static_cast<std::size_t>(hint) : 1024);
+    passwd record{};
+    passwd* found = nullptr;
+    int status = 0;
+    while ((status = getpwuid_r(getuid(), &record, buffer.data(), buffer.size(), &found)) == ERANGE) {
+        buffer.resize(buffer.size() * 2);
+    }
+    if (status == 0 && found && found->pw_dir) {
+        return addon::path_from_utf8(found->pw_dir);
+    }
+#endif
+    return "/root";
+}
+
+bool under_readable_root(const fs::path& file, const fs::path& root)
+{
+    std::error_code error;
+    const auto resolved = fs::canonical(root, error);
+    if (error) {
+        return false;
+    }
+    for (auto ancestor = file; !ancestor.empty();) {
+        // Identity also handles case-insensitive volumes without changing the
+        // user's path spelling or treating a sibling prefix as containment.
+        if (ancestor == resolved || (fs::equivalent(ancestor, resolved, error) && !error)) {
+            return true;
+        }
+        const auto parent = ancestor.parent_path();
+        if (parent == ancestor) {
+            break;
+        }
+        ancestor = parent;
+    }
+    return false;
+}
+
+bool stock_writable_root(const fs::path& path, const fs::path& grok_home, const fs::path& user_home,
+    const fs::path& launch_cwd)
+{
+    const auto absolute = path.is_absolute() ? path : launch_cwd / path;
+    std::error_code error;
+    const auto status = fs::symlink_status(absolute, error);
+    if (error) {
+        return false;
+    }
+    const auto mismatch = std::mismatch(grok_home.begin(), grok_home.end(), path.begin(), path.end());
+    if (!fs::is_symlink(status) || path == grok_home || mismatch.first != grok_home.end()) {
+        return true;
+    }
+    // Native strict skips an escaping symlink below GROK_HOME except for its
+    // supported link to the user's default sessions directory.
+    const auto target = fs::canonical(absolute, error);
+    if (error || !fs::is_directory(target, error) || error) {
+        return false;
+    }
+    return target == grok_home / path.filename() ||
+        (path.filename() == "sessions" && target == user_home / ".grok" / "sessions");
+}
+
+bool strict_blocks_initial_brief(const addon::Prepare_request& request, const Launcher_command& command,
+    std::string_view profile_home)
+{
+    const auto& launch = *request.launch_environment;
+    if (!request.initial_prompt ||
+        (!launch.platform_id.starts_with("linux-") && !launch.platform_id.starts_with("macos-")))
+    {
+        return false;
+    }
+    const auto environment = addon::environment_pairs(launch.effective_environment);
+    auto selection = native_option_value(command.prefix_arguments, "--sandbox");
+    const auto authored_profile = authored_environment_name(request.launcher, command, "GROK_SANDBOX")
+        ? addon::environment_value(environment, "GROK_SANDBOX") : std::string{};
+    if (!selection && !authored_profile.empty()) {
+        selection = authored_profile;
+    }
+    if (!selection || *selection != "strict") {
+        return false;
+    }
+
+    const auto launch_cwd = addon::path_from_utf8(request.working_directory);
+    const auto absolute = [&launch_cwd](fs::path path) {
+        return path.is_absolute() ? path : launch_cwd / path;
+    };
+    std::error_code error;
+    const auto file = fs::canonical(addon::path_from_utf8(request.initial_prompt->referenced_file), error);
+    if (error) {
+        return false;
+    }
+    auto workspace = launch_cwd;
+    if (const auto cwd = native_option_value(command.prefix_arguments, "--cwd")) {
+        const auto selected = fs::canonical(absolute(addon::path_from_utf8(*cwd)), error);
+        if (!error) {
+            workspace = selected;
+        }
+    }
+    // Stock strict's process-wide read roots. --add-dir is session input and
+    // never reaches startup sandbox application. User/custom policy is not
+    // inspected or replaced by this one known-profile check.
+    const auto home      = native_home(environment);
+    const auto grok_home = addon::path_from_utf8(profile_home);
+    const std::vector<fs::path> roots{
+        "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/dev", "/proc", "/sys",
+        "/tmp", "/run", "/var", "/System", "/Library", "/private",
+        absolute(home) / "Library", workspace, absolute(grok_home),
+    };
+    if (std::any_of(roots.begin(), roots.end(), [&file](const auto& root) {
+        return under_readable_root(file, root);
+    })) {
+        return false;
+    }
+    std::vector<fs::path> writable{grok_home / "sessions", "/tmp", "/var/tmp"};
+    if (launch.platform_id.starts_with("macos-")) {
+        for (const auto* directory : {"/private/tmp", "/private/var/tmp", "/private/var/folders"}) {
+            if (fs::is_directory(directory, error) && !error) {
+                writable.emplace_back(directory);
+            }
+        }
+    }
+    const auto temporary = addon::environment_value(environment, "TMPDIR");
+    if (!temporary.empty()) {
+        const auto path = addon::path_from_utf8(temporary);
+        if (fs::is_directory(absolute(path), error) && !error) {
+            writable.push_back(path);
+        }
+    }
+    return std::none_of(writable.begin(), writable.end(), [&](const auto& root) {
+        return stock_writable_root(root, grok_home, home, launch_cwd) && under_readable_root(file, absolute(root));
+    });
+}
+
+void refuse_initial_prompt(addon::Invocation_context& context, std::string detail)
+{
+    context.fail(addon::Result_status::UNAVAILABLE, addon::reason::k_initial_prompt_unavailable, std::move(detail));
 }
 }
 void prepare_delegated(addon::Invocation_context& context)
@@ -244,10 +481,19 @@ void handle_preparation(addon::Invocation_context& context)
     const auto request = addon::decode_prepare_request(context.request().payload, &failure, 3);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
     const auto command = recognize_launcher(request->launcher.script_body);
+    const bool interactive = command && interactive_arguments(
+        command->prefix_arguments, request->initial_prompt.has_value());
+    if (request->initial_prompt &&
+        (!interactive || !verbatim_initial_prompt(request->initial_prompt->text)))
+    {
+        refuse_initial_prompt(context,
+            "This Grok launcher cannot deliver the first message unchanged in a new interactive session.");
+        return;
+    }
     addon::Launch_patch patch;
     patch.account_context = request->account_context;
     patch.profile_storage = request->profile_storage;
-    if (!command || !interactive_arguments(command->prefix_arguments)) {
+    if (!interactive) {
         if (request->session_wake) patch.session_wake = addon::Session_wake_preparation{
             false, addon::Json_value::object(), "native_interactive_launch_unavailable"};
         patch.disposition = addon::Launch_disposition{false, false, false};
@@ -261,6 +507,10 @@ void handle_preparation(addon::Invocation_context& context)
     account.launch_environment = request->launch_environment;
     const auto profile = launch_profile_home(account, context);
     if (!profile) return;
+    if (strict_blocks_initial_brief(*request, *command, *profile)) {
+        refuse_initial_prompt(context, "This Grok launch's strict sandbox cannot read the continuation brief.");
+        return;
+    }
     const auto assignments = launcher_environment(*command, request->launch_environment->effective_environment);
     if (!assignments) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_environment_unavailable"); return; }
     const auto program = resolve_probe_launcher(*command, {},
@@ -273,13 +523,26 @@ void handle_preparation(addon::Invocation_context& context)
     probe.push_back("--help");
     const auto help = run_probe(probe, environment, request->working_directory, 3000, context);
     if (!help || help->output.find("--session-id") == std::string::npos || help->output.find("--resume") == std::string::npos) {
+        if (request->initial_prompt && !context.cancel_requested()) {
+            refuse_initial_prompt(context, "This Grok does not expose the required interactive session interface.");
+            return;
+        }
         context.fail(context.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
             "interactive_cli_contract_unavailable"); return;
+    }
+    if (request->initial_prompt && help->output.find("[PROMPT]") == std::string::npos) {
+        refuse_initial_prompt(context, "This Grok cannot start an interactive session with a first message.");
+        return;
     }
     auto argv = *program;
     // Standalone execution keeps this launch out of an unrelated persistent
     // leader and makes its environment visible to its own native hooks.
-    argv.push_back("--no-leader");
+    if (!request->initial_prompt ||
+        std::find(command->prefix_arguments.begin(), command->prefix_arguments.end(), "--no-leader") ==
+            command->prefix_arguments.end())
+    {
+        argv.push_back("--no-leader");
+    }
     argv.insert(argv.end(), command->prefix_arguments.begin(), command->prefix_arguments.end());
     patch.argv = std::move(argv);
     patch.set = *assignments;
@@ -288,6 +551,18 @@ void handle_preparation(addon::Invocation_context& context)
     patch.apply_managed_configuration = true;
     patch.disposition = addon::Launch_disposition{true, true, true};
     if (request->session_wake) prepare_wake(patch, command->prefix_arguments, help->output);
+    if (request->initial_prompt) {
+        // Wake preparation can replace the native invocation with its bridge;
+        // both paths forward the trailing native arguments without a shell.
+        patch.argv->insert(patch.argv->end(), {"--", request->initial_prompt->text});
+        patch.initial_prompt = addon::Initial_prompt_acknowledgment{
+            addon::initial_prompt_text_digest_hex(request->initial_prompt->text)};
+        if (!addon::validate_launch_patch(patch, {}, {}, &failure)) {
+            refuse_initial_prompt(context,
+                "The launch with the first message exceeds the supported invocation: " + failure.detail);
+            return;
+        }
+    }
     context.succeed(addon::encode_launch_patch(patch, 3));
 }
 } // namespace grok
