@@ -318,25 +318,39 @@ void prepare_delegated(addon::Invocation_context& context)
     if (!assignments) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_environment_unavailable"); return; }
     std::vector<std::string> arguments{"agent", "--no-leader"};
     for (std::size_t i = 0; i < command->prefix_arguments.size(); ++i) {
-        const auto& option = command->prefix_arguments[i];
+        const auto& argument = command->prefix_arguments[i];
+        const auto separator = argument.find('=');
+        const auto option = argument.substr(0, separator);
         // The launcher's own approval posture carries over; grok agent has no
         // equivalent of the interactive permission mode or rule options.
-        if (option == "--always-approve") {
+        if (argument == "--always-approve") {
             arguments.push_back(option);
             continue;
         }
         if (option != "--model" && option != "-m" && option != "--reasoning-effort" && option != "--effort") {
             context.fail(addon::Result_status::UNAVAILABLE, "delegated_launcher_options_unavailable",
                 "Grok runs a delegated task in its agent mode, which takes only --model, --reasoning-effort and "
-                "--always-approve from a launcher; the launcher's " + option.substr(0, option.find('=')) +
+                "--always-approve from a launcher; the launcher's " + option +
                 " has no agent-mode equivalent.");
             return;
         }
-        if (++i == command->prefix_arguments.size()) {
+        // Normalize both native spellings without consuming the next option
+        // after an equals value or changing repeated-option order.
+        std::string_view value;
+        if (separator != std::string::npos) {
+            value = std::string_view(argument).substr(separator + 1);
+        }
+        else {
+            if (++i == command->prefix_arguments.size()) {
+                context.fail(addon::Result_status::FAILED, "invalid_launcher_option"); return;
+            }
+            value = command->prefix_arguments[i];
+        }
+        if (value.empty() || value.starts_with('-')) {
             context.fail(addon::Result_status::FAILED, "invalid_launcher_option"); return;
         }
         arguments.push_back(option);
-        arguments.push_back(command->prefix_arguments[i]);
+        arguments.emplace_back(value);
     }
     arguments.push_back("stdio");
     const auto argv = resolve_probe_launcher(*command, arguments,
