@@ -126,6 +126,8 @@ foreach(test_name IN ITEMS
     add_test(NAME ${test_name} COMMAND ${test_name})
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
 endforeach()
+target_compile_definitions(grok_runtime_tests PRIVATE
+    GROK_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
 if(MINGW)
     target_link_options(grok_initial_prompt_tests PRIVATE -municode)
 endif()

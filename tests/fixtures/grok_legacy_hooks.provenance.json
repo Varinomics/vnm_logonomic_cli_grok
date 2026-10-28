@@ -1,0 +1,21 @@
+{
+  "source_repository": "https://github.com/Varinomics/vnm_logonomic_cli_grok",
+  "source_revision": "42df3d37d3d9095468c0725a7b92d864c7327109",
+  "source_path": "src/grok_configuration.cpp",
+  "origin": "Exact six-event serialized output of the historical generator, before the event additions in 9cb264826b7371b1e6a9d03a5e0a4871efe730e9.",
+  "windows_observation": "Windows bytes match the pre-migration installed file captured during the 2026-10-28 failure diagnosis.",
+  "fixtures": [
+    {
+      "file": "grok_legacy_hooks_windows.json",
+      "platform": "windows",
+      "sha256": "fdfef0aa872b328f613cc271f0e8a52e95a9891ee1eb2510567766b3c84a4f8e",
+      "bytes": 4134
+    },
+    {
+      "file": "grok_legacy_hooks_posix.json",
+      "platform": "posix",
+      "sha256": "b3206ab48ba1cc52a65a50a4aadbcac88e300feacc5d704bbe6b233dded33701",
+      "bytes": 1434
+    }
+  ]
+}

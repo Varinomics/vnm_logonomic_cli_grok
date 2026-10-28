@@ -8,14 +8,19 @@
 #include <logonomic_cli_addon/json.h>
 #include <iostream>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <algorithm>
 #include <cstdlib>
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/managed_configuration.h>
+#include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 namespace addon = logonomic::cli_addon;
 void require(bool value, const char* message)
 {
@@ -107,20 +112,73 @@ public:
     addon::Json_value output;
     bool succeeded = false;
     bool done = false;
+    addon::Result_status status = addon::Result_status::FAILED;
     std::string detail;
     const addon::Invoke_request& request() const override { return input; }
     bool cancel_requested() const override { return false; }
     bool wait_for_cancel(int) override { return false; }
     void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
     void succeed(addon::Json_value value) override { succeeded = true; done = true; output = std::move(value); }
-    void fail(addon::Result_status, std::string reason, std::string text) override
+    void fail(addon::Result_status result, std::string reason, std::string text) override
     {
         done = true;
+        status = result;
         output = addon::Json_value(std::move(reason));
         detail = std::move(text);
     }
     bool finished() const override { return done; }
 };
+void managed_configuration_contract()
+{
+#ifdef _WIN32
+    const auto fixture_name = "grok_legacy_hooks_windows.json";
+#else
+    const auto fixture_name = "grok_legacy_hooks_posix.json";
+#endif
+    std::ifstream fixture(addon::path_from_utf8(GROK_TEST_FIXTURE_DIR) / fixture_name, std::ios::binary);
+    require(fixture.is_open(), "The historical hook fixture must be available");
+    const std::string legacy((std::istreambuf_iterator<char>(fixture)), std::istreambuf_iterator<char>());
+    require(!fixture.bad() && !legacy.empty(), "The historical hook fixture must be readable");
+    const auto desired = grok::hook_configuration();
+    const auto transform = [](bool present, const std::string& content) {
+        Context context;
+        context.input.capability = {"managed-configuration", 2};
+        context.input.operation = "transform";
+        context.input.payload = addon::encode_managed_configuration_transform_request(
+            {addon::random_nonce_hex(), present, content});
+        const auto original = context.input.payload;
+        grok::transform_configuration(context);
+        require(context.input.payload == original, "A hook transform must leave the supplied snapshot unchanged");
+        return context;
+    };
+    for (const auto& input : std::vector<std::pair<bool, std::string>>{
+        {false, {}}, {true, desired}, {true, legacy}})
+    {
+        const auto context = transform(input.first, input.second);
+        const auto request = addon::decode_managed_configuration_transform_request(context.input.payload, nullptr);
+        const auto result = addon::decode_managed_configuration_transform_result(context.output, nullptr);
+        require(context.succeeded && request && result && result->grant == request->grant && result->content == desired,
+            "Absent, current and historical owned hooks must return the current content with the original grant");
+    }
+    const auto parsed = addon::parse_json(legacy, {}, nullptr);
+    require(parsed && parsed->find("hooks"), "The historical fixture must contain its native hooks");
+    auto modified = *parsed;
+    modified.find("hooks")->find("SessionStart")->as_array().front().find("hooks")->as_array().front().set(
+        "command", addon::Json_value("user-owned"));
+    auto mixed = *parsed;
+    auto user_hook = addon::Json_value::object();
+    user_hook.set("type", addon::Json_value("command"));
+    user_hook.set("command", addon::Json_value("user-owned"));
+    mixed.find("hooks")->find("StopFailure")->as_array().front().find("hooks")->push_back(std::move(user_hook));
+    for (const auto& content : {addon::serialize_json(modified) + '\n', addon::serialize_json(mixed) + '\n',
+        std::string("{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"user-owned\"}]}]}}")})
+    {
+        const auto context = transform(true, content);
+        require(!context.succeeded && context.status == addon::Result_status::UNAVAILABLE &&
+            context.output == addon::Json_value("managed_hook_file_conflict"),
+            "Modified, mixed and foreign hooks must refuse without returning replacement content");
+    }
+}
 int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "--help") {
@@ -128,6 +186,7 @@ int main(int argc, char** argv)
     }
     try {
         launcher_approval_contract();
+        managed_configuration_contract();
         require(grok::wake_compatible_arguments({"--model", "grok-4.6", "--effort=high"}),
             "native model options rejected by wake launch");
         require(grok::wake_compatible_arguments({"--resume", "8e18215e-f612-4131-95dd-7890139a41ae"}),
@@ -163,13 +222,6 @@ int main(int argc, char** argv)
         const auto failed = grok::classify_hook(event("StopFailure"));
         require(failed && failed->observations.front().outcome_transition == addon::Outcome_transition::FAILED,
             "native failure lost");
-        Context config_context;
-        config_context.input.operation = "transform";
-        config_context.input.payload = addon::encode_managed_configuration_transform_request(
-            {addon::random_nonce_hex(), true, "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"user-owned\"}]}]}}"});
-        grok::transform_configuration(config_context);
-        require(!config_context.succeeded && config_context.output == addon::Json_value("managed_hook_file_conflict"),
-            "managed transform overwrote an existing foreign hook file");
         namespace fs = std::filesystem;
         const auto root = fs::canonical(fs::temp_directory_path()) / ("grok-prepare-" + addon::random_nonce_hex());
         fs::create_directories(root / "profiles" / "native");

@@ -2,9 +2,11 @@
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#include <initializer_list>
 namespace grok {
 namespace addon = logonomic::cli_addon;
-std::string hook_configuration()
+namespace {
+std::string hooks_for_events(std::initializer_list<const char*> events)
 {
 #ifdef _WIN32
     // EncodedCommand prevents the vendor's POSIX expansion pass and whichever
@@ -26,8 +28,7 @@ std::string hook_configuration()
         "exec \"${LOGONOMIC_PROVIDER_HELPERS_DIR:-}/grok_helper\"; fi";
 #endif
     auto hooks = addon::Json_value::object();
-    for (const std::string event : {"SessionStart", "SessionEnd", "UserPromptSubmit",
-             "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact"}) {
+    for (const auto* event : events) {
         auto handler = addon::Json_value::object();
         handler.set("type", addon::Json_value("command"));
         handler.set("command", addon::Json_value(command));
@@ -44,6 +45,12 @@ std::string hook_configuration()
     root.set("hooks", std::move(hooks));
     return addon::serialize_json(root) + '\n';
 }
+} // namespace
+std::string hook_configuration()
+{
+    return hooks_for_events({"SessionStart", "SessionEnd", "UserPromptSubmit",
+        "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact"});
+}
 void transform_configuration(addon::Invocation_context& context)
 {
     if (context.request().operation != addon::k_managed_configuration_transform_operation) {
@@ -54,8 +61,12 @@ void transform_configuration(addon::Invocation_context& context)
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
     const auto desired = hook_configuration();
     // This declaration owns one dedicated file, never the surrounding hook
-    // directory. A pre-existing different file belongs to its author.
-    if (request->present && request->content != desired) {
+    // directory. Only the exact previous generated output is also ours;
+    // preserve refusal for a user-modified or otherwise foreign file.
+    if (request->present && request->content != desired &&
+        request->content != hooks_for_events({"SessionStart", "SessionEnd", "UserPromptSubmit",
+            "PreToolUse", "StopFailure", "StopCancelled"}))
+    {
         context.fail(addon::Result_status::UNAVAILABLE, "managed_hook_file_conflict"); return;
     }
     context.succeed(addon::encode_managed_configuration_transform_result({request->grant, desired}));
