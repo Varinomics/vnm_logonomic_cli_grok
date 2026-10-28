@@ -59,4 +59,9 @@ file(WRITE "${profile}/auth.json"
 \"expires_at\":\"2020-01-01T01:00:00Z\",\"oidc_issuer\":\"https://auth.x.ai\",\
 \"oidc_client_id\":\"b1a00492-073a-47ea-816f-4c329264a828\"}}")
 expect_state(error "An expired login" "GROK_HOME=${profile}")
+file(WRITE "${profile}/auth.json" "{\"https://auth.x.ai::")
+expect_state(error "An incomplete credential file" "GROK_HOME=${profile}")
+file(REMOVE "${profile}/auth.json")
+file(MAKE_DIRECTORY "${profile}/auth.json")
+expect_state(error "A credential path that cannot be read as a file" "GROK_HOME=${profile}")
 file(REMOVE_RECURSE "${WORK_DIRECTORY}")

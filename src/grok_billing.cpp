@@ -150,12 +150,11 @@ std::optional<std::chrono::sys_time<std::chrono::milliseconds>> timestamp(
         minutes(offset_minutes) + milliseconds(fraction_ms);
 }
 
-std::optional<Credential> read_credential(const fs::path& profile)
+std::optional<Credential> parse_credential(const addon::Json_value& auth)
 {
-    const auto auth = read_json(profile / "auth.json", 64 * 1024);
-    if (!auth || !auth->is_object()) return std::nullopt;
+    if (!auth.is_object()) return std::nullopt;
     constexpr std::string_view scope = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
-    const auto* entry = auth->find(scope);
+    const auto* entry = auth.find(scope);
     if (!entry || !entry->is_object()) return std::nullopt;
     const auto& bearer = member(*entry, "key");
     const auto& user_id = member(*entry, "user_id");
@@ -204,13 +203,28 @@ addon::Quota_inspect_result status(addon::Quota_status state)
     return result;
 }
 
-std::optional<addon::Json_value> response_json(const std::optional<Billing_http_response>& response)
+std::optional<addon::Json_value> response_json(
+    const std::optional<Billing_http_response>& response, addon::Quota_inspect_result& failure)
 {
-    if (!response || response->status != 200) return std::nullopt;
+    if (!response) {
+        failure = addon::make_quota_failure(addon::Quota_failure::REQUEST_FAILED);
+        return std::nullopt;
+    }
+    const addon::Quota_diagnostic diagnostic{addon::Quota_failure_stage::HTTP_RESPONSE, response->status};
+    if (response->status != 200) {
+        const auto reason = response->status == 401
+            ? addon::Quota_failure::AUTHENTICATION_REQUIRED
+            : addon::Quota_failure::REQUEST_REJECTED;
+        failure = addon::make_quota_failure(reason, {}, diagnostic);
+        return std::nullopt;
+    }
     addon::Json_parse_limits limits;
     limits.max_bytes = 64 * 1024;
     auto value = addon::parse_json(response->body, limits, nullptr);
-    if (!value || !value->is_object()) return std::nullopt;
+    if (!value || !value->is_object()) {
+        failure = addon::make_quota_failure(addon::Quota_failure::INVALID_RESPONSE, {}, diagnostic);
+        return std::nullopt;
+    }
     return value;
 }
 
@@ -240,6 +254,7 @@ bool no_monthly_cap(const addon::Json_value& config)
 addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
 {
     using addon::Quota_status;
+    using addon::Quota_failure;
     // UNAVAILABLE means this profile has no quota the helper can read; FAILED
     // means this attempt could not read it. Only a failure keeps the host's
     // last figure on display, greyed as out of date.
@@ -248,27 +263,40 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     std::error_code file_error;
     if (!fs::exists(profile / "auth.json", file_error))
         return status(file_error ? Quota_status::FAILED : Quota_status::NOT_LOGGED_IN);
-    const auto credential = read_credential(profile);
+    const auto auth = read_json(profile / "auth.json", 64 * 1024);
+    if (!auth) {
+        return status(Quota_status::FAILED);
+    }
+    const auto credential = parse_credential(*auth);
     if (!credential) return status(Quota_status::UNAVAILABLE);
     // An expired access token is not refreshed here. Grok rotates its refresh
     // token under its own auth.json lock, and a second refresher would spend a
     // token Grok still holds. Grok refreshes it the next time it runs.
-    if (std::chrono::system_clock::now() >= credential->expires_at) return status(Quota_status::FAILED);
+    if (std::chrono::system_clock::now() >= credential->expires_at) {
+        return addon::make_quota_failure(Quota_failure::CREDENTIALS_EXPIRED);
+    }
     const auto version = read_version(profile);
+    addon::Quota_inspect_result failure;
     const auto billing = response_json(get_billing_resource("/v1/billing?format=credits",
-        credential->bearer, credential->user_id, version));
-    if (!billing) return status(Quota_status::FAILED);
+        credential->bearer, credential->user_id, version), failure);
+    if (!billing) {
+        return failure;
+    }
+    const addon::Quota_diagnostic billing_diagnostic{addon::Quota_failure_stage::HTTP_RESPONSE, 200};
     const auto& config = member(*billing, "config");
     if (config.is_null()) return status(Quota_status::UNAVAILABLE);
-    if (!config.is_object()) return status(Quota_status::FAILED);
+    if (!config.is_object()) {
+        return addon::make_quota_failure(Quota_failure::INVALID_RESPONSE, {}, billing_diagnostic);
+    }
     // Grok's client reads an explicit null percentage as an omitted one.
     const auto* reported_percent = config.find("creditUsagePercent");
     if (reported_percent && reported_percent->is_null()) reported_percent = nullptr;
-    if (reported_percent && (!reported_percent->is_number() || !std::isfinite(reported_percent->as_number())))
-        return status(Quota_status::FAILED);
+    if (reported_percent && (!reported_percent->is_number() || !std::isfinite(reported_percent->as_number()))) {
+        return addon::make_quota_failure(Quota_failure::INVALID_RESPONSE, {}, billing_diagnostic);
+    }
 
     const auto settings = response_json(get_billing_resource("/v1/settings",
-        credential->bearer, credential->user_id, version));
+        credential->bearer, credential->user_id, version), failure);
     std::optional<std::string> tier;
     if (settings) {
         const auto& value = member(*settings, "subscription_tier_display");
@@ -277,12 +305,14 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     }
 
     const auto& period = member(config, "currentPeriod");
-    if (!period.is_object()) return status(Quota_status::FAILED);
+    if (!period.is_object()) {
+        return addon::make_quota_failure(Quota_failure::INVALID_RESPONSE, {}, billing_diagnostic);
+    }
     const auto& type = member(period, "type");
     const auto& start_text = member(period, "start");
     const auto& end_text = member(period, "end");
     if (!start_text.is_string() || !end_text.is_string()) {
-        return status(Quota_status::FAILED);
+        return addon::make_quota_failure(Quota_failure::INVALID_RESPONSE, {}, billing_diagnostic);
     }
     std::string start_fraction;
     std::string end_fraction;
@@ -290,7 +320,7 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     const auto end   = timestamp(end_text.as_string(), &end_fraction);
     const auto now   = std::chrono::system_clock::now();
     if (!start || !end || *start >= *end || now < *start || now >= *end) {
-        return status(Quota_status::FAILED);
+        return addon::make_quota_failure(Quota_failure::INVALID_RESPONSE, {}, billing_diagnostic);
     }
     // Equal submillisecond fractions cancel when measuring a period. Keep
     // them through validation so flooring the SDK reset never rounds an
@@ -298,7 +328,7 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     const auto duration       = *end - *start;
     const auto window_minutes = std::chrono::duration_cast<std::chrono::minutes>(duration);
     if (window_minutes.count() <= 0 || duration != window_minutes || start_fraction != end_fraction) {
-        return status(Quota_status::FAILED);
+        return addon::make_quota_failure(Quota_failure::INVALID_RESPONSE, {}, billing_diagnostic);
     }
     // quota@2 carries the native percentage, so usage past the allowance stays
     // above 100 and a negative value is preserved rather than saturated.
@@ -319,7 +349,9 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
         // where zero cannot stand for an unmetered plan: a paid SuperGrok tier
         // on unified billing inside its current weekly period. Without the
         // tier the attempt could not decide.
-        if (!settings) return status(Quota_status::FAILED);
+        if (!settings) {
+            return failure;
+        }
         const auto& unified = member(config, "isUnifiedBillingUser");
         if (tier && paid_supergrok(*tier) && no_monthly_cap(config) &&
             unified.is_boolean() && unified.as_boolean() &&
@@ -331,7 +363,8 @@ addon::Quota_inspect_result fetch_billing_quota(std::string_view profile_path)
     if (!percent) return status(Quota_status::UNAVAILABLE);
     // The figures belong to the credential that fetched them. If Grok replaced
     // it meanwhile, the next refresh reads the current one.
-    const auto current_credential = read_credential(profile);
+    const auto current_auth = read_json(profile / "auth.json", 64 * 1024);
+    const auto current_credential = current_auth ? parse_credential(*current_auth) : std::nullopt;
     if (!current_credential || current_credential->scope_key != credential->scope_key ||
         current_credential->bearer != credential->bearer ||
         current_credential->user_id != credential->user_id ||
