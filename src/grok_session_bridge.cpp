@@ -2,6 +2,8 @@
 #include "grok_wake_transport.h"
 #include "grok_wake_identity.h"
 #include "grok_json.h"
+#include <logonomic_cli_addon/helper_client.h>
+#include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/session_wake.h>
 #include <chrono>
 #include <cstdio>
@@ -53,6 +55,7 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
     }
     Wake_protocol protocol;
     Wake_session_identity identity;
+    const auto helper_environment = addon::read_helper_environment(nullptr);
     std::optional<Request> request;
     const auto reply = [&](const Json& value) { runtime->reply(addon::serialize_json(value)); };
     const auto unavailable = [&](bool notify, const std::string& reason) {
@@ -66,6 +69,21 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
                 reply(addon::encode_session_wake_notify_result(native_result(result)));
                 request.reset();
             }
+        }
+        for (const auto& event : exchange.interactions) {
+            if (!helper_environment || identity.transition_nonce().empty()) continue;
+            const auto deadline = Clock::now() + std::chrono::milliseconds(1800);
+            const auto cancelled = [&] { return Clock::now() >= deadline; };
+            addon::Helper_client client(*helper_environment, cancelled);
+            const auto key = addon::random_nonce_hex();
+            // This is the admitted SessionStart nonce, not a native request ID.
+            // The classifier checks it against the host ledger before applying
+            // late delivery to a resumed instance of the same native session.
+            auto outcome = client.deliver_provider_event(event.name, event.body, key, identity.transition_nonce());
+            if (!outcome.committed && !cancelled() &&
+                (outcome.exit_code == addon::k_helper_exit_transport_failure || outcome.exit_code == addon::k_helper_exit_pending))
+                outcome = client.deliver_provider_event(event.name, event.body, key, identity.transition_nonce());
+            if (outcome.committed) (void)client.acknowledge_provider_event(key);
         }
     };
     const auto send = [&](Wake_exchange exchange) {

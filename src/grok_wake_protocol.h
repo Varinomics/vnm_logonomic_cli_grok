@@ -1,5 +1,7 @@
 #pragma once
 
+#include <logonomic_cli_addon/helper_ingress.h>
+
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -31,6 +33,7 @@ struct Wake_exchange
     std::string              stdin_bytes;
     std::vector<Wake_result> results;
     bool                     writes_prompt = false;
+    std::vector<logonomic::cli_addon::Provider_event> interactions;
 };
 
 // One instance belongs to one persistent native ACP connection. The caller
@@ -69,9 +72,17 @@ private:
         bool        write_started = false;
     };
 
+    struct Pending_interaction
+    {
+        std::string                      kind;
+        logonomic::cli_addon::Json_value request_id;
+    };
+
     using Notification_key = std::pair<std::string, std::string>;
 
     std::string   query_session();
+    Wake_exchange receive_interaction(const logonomic::cli_addon::Json_value& params);
+    Wake_exchange receive_interaction_request(const logonomic::cli_addon::Json_value& request);
     Wake_exchange finish_notification(Wake_outcome outcome, std::string reason);
     Wake_exchange fail(std::string reason);
 
@@ -87,9 +98,11 @@ private:
     std::string m_info_request_id;
     uint64_t    m_next_request = 1;
 
-    std::optional<Pending_notification>       m_pending;
-    std::map<Notification_key, Wake_result>   m_completed;
-    std::map<std::string, Notification_key>   m_prompt_requests;
+    std::optional<Pending_notification>        m_pending;
+    std::map<Notification_key, Wake_result>    m_completed;
+    std::map<std::string, Notification_key>    m_prompt_requests;
+    std::string                               m_attention_session_id;
+    std::map<std::string, Pending_interaction> m_pending_interactions;
 };
 
 } // namespace grok

@@ -10,10 +10,10 @@
       "root_turn_completion": "supported",
       "subagents": "unsupported",
       "confirmed_phase_status": "supported",
-      "attention": "unsupported",
+      "attention": "supported",
       "cooperative_description": "unsupported",
       "blockable_completion": "unsupported",
-      "paired_attention": "unsupported"
+      "paired_attention": "supported"
     }
   }
 }

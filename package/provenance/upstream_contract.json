@@ -33,6 +33,27 @@
     ],
     "wire": "Persistent native stdio client: initialize, authenticated current-launch SessionStart identity and transition nonce, unscoped _x.ai/sessions/list with exact resident identity, session/prompt with correlated _meta.promptId and _x.ai/queue/changed admission. No session/load or callback responses. Native TUI terminal/filesystem reverse-client options are excluded; its supported interactive requests broadcast to all session subscribers."
   },
+  "interaction_attention": {
+    "source_snapshot": "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8",
+    "contracts": [
+      "crates/codegen/xai-grok-shell/src/session/pending_interaction.rs",
+      "crates/codegen/xai-grok-shell/src/extensions/notification.rs",
+      "crates/codegen/xai-grok-shell/src/leader/server.rs",
+      "crates/codegen/xai-grok-shell/src/leader/protocol.rs",
+      "crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs",
+      "crates/codegen/xai-grok-shell/src/session/mcp_elicitation.rs",
+      "crates/codegen/xai-grok-workspace/src/permission/manager/mod.rs",
+      "crates/codegen/xai-grok-workspace/src/permission/prompter.rs",
+      "crates/codegen/xai-acp-lib/src/gateway.rs",
+      "crates/codegen/xai-grok-tools/src/implementations/grok_build/ask_user_question/types.rs",
+      "crates/codegen/xai-grok-tools/src/implementations/grok_build/exit_plan_mode/types.rs",
+      "crates/codegen/xai-grok-tools/src/mcp_elicitation/types.rs",
+      "crates/codegen/xai-grok-pager-bin/src/main.rs",
+      "crates/codegen/xai-grok-shell/src/agent/app.rs"
+    ],
+    "wire": "PendingInteractionGuard broadcasts pending_interaction and interaction_resolved through x.ai/session_notification, with native sessionId, tool_call_id and pending kind. Permission guards precede automatic policy handling and do not alone establish attention. The matching session/request_permission, x.ai/ask_user_question, x.ai/exit_plan_mode or x.ai/mcp/elicit reverse RPC establishes the actual wait. The bridge retains its native JSON-RPC request ID and carries that exact identity on guard resolution. Native ACP allocates a new request ID for every reverse RPC, including successive waits sharing a tool_call_id. Typed JSON encoding preserves integer/string identity. Guard resolution is emitted once and is not persisted or replayed. Attention observation issues no native request, subscription, load or resume. Native stdio may reconnect with bounded retries and replay initialize, but this control client has no cached new/load/resume session state to restore its subscription. Reverse-RPC IDs belong to the AgentSideConnection behind the leader; reconnecting to the same leader does not reset their allocation. Missing pending/resolved frames cannot be reconstructed.",
+    "scope": "Only the authenticated root session after an existing legitimate session/prompt wake has subscribed its persistent connection. No new native subscription, load, resume or reverse response. Driver transfer on subscriber disconnect prevents safe passive startup subscription; roster needs_input has no paired request identity and is not used as attention. No replay/snapshot or child coverage is claimed."
+  },
   "icons": {
     "upstream": "https://github.com/lobehub/lobe-icons",
     "license": "MIT",
@@ -43,7 +64,7 @@
     "version": "0.10.4",
     "sha256": "10eeef5e80864f9c3c148a3f395c3e35a66d37ec7561c7845b2bffae8e841759",
     "source": "https://static.crates.io/crates/agent-client-protocol/agent-client-protocol-0.10.4.crate",
-    "wire_rule": "src/lib.rs ext_method and ext_notification both prepend underscore; receive dispatch strips it."
+    "wire_rule": "src/lib.rs ext_method and ext_notification both prepend underscore; receive dispatch strips it. src/rpc.rs allocates each outgoing request a new AtomicI64 ID on its one persistent connection. Request and notification publication use its ordered unbounded outgoing channel."
   },
   "documentation": [
     "https://docs.x.ai/build/overview",

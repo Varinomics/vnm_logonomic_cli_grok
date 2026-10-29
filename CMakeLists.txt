@@ -155,6 +155,14 @@ target_link_libraries(grok_wake_bridge_tests PRIVATE grok_wake_bridge_fixture gr
 grok_target(grok_wake_bridge_tests)
 add_test(NAME grok_wake_bridge_tests COMMAND grok_wake_bridge_tests)
 set_tests_properties(grok_wake_bridge_tests PROPERTIES TIMEOUT 45)
+add_executable(grok_attention_bridge_tests tests/grok_attention_bridge_tests.cpp)
+target_link_libraries(grok_attention_bridge_tests PRIVATE grok_wake_bridge_fixture grok_provider)
+grok_target(grok_attention_bridge_tests)
+add_dependencies(grok_attention_bridge_tests grok_package)
+add_test(NAME grok_attention_bridge_tests COMMAND grok_attention_bridge_tests "${GROK_PACKAGE_DIRECTORY}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pending_interactions.jsonl"
+    "${CMAKE_CURRENT_BINARY_DIR}/grok-attention-receipt.jsonl")
+set_tests_properties(grok_attention_bridge_tests PROPERTIES TIMEOUT 45)
 # The billing tests build the helper's own sources against a scripted HTTPS
 # transport; the packaged helper itself runs in grok_quota_bridge_tests.
 add_executable(grok_billing_tests tests/grok_billing_tests.cpp src/grok_billing.cpp)

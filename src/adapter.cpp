@@ -45,7 +45,7 @@ void invoke(addon::Invocation_context& context)
         else if (capability == "auth-status" || capability == "quota") grok::handle_probes(context);
         else if (capability == "usage-scan") grok::handle_usage(context);
         else if (capability == "managed-configuration") grok::transform_configuration(context);
-        else if (capability == "helper-ingress") grok::handle_lifecycle(context);
+        else if (capability == "helper-ingress" || capability == addon::k_attention_kind_capability_id) grok::handle_lifecycle(context);
         else if (capability == "session-wake") grok::handle_wake(context);
         else if (capability == "profile-storage" && context.request().operation == "acknowledge") {
             addon::acknowledge_profile_storage(context);
@@ -71,6 +71,7 @@ int main()
         {"lifecycle-events", 2}, {"helper-ingress", 2}, {"context-state", 2}, {"coordination-delivery", 1},
         {"model-context-delivery", 1}, {"interactive-resume", 2}, {"structured-session", 3}, {"delegated-session", 3},
         {"session-wake", 1},
+        {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
     };
     addon::Adapter_runtime runtime(std::move(options));
     runtime.set_invoke_handler(invoke);
