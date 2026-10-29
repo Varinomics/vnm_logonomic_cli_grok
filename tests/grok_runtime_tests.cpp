@@ -128,6 +128,67 @@ public:
     }
     bool finished() const override { return done; }
 };
+// The public structured and delegated entry points share agent preparation.
+// Equivalent native spellings must keep values, order and approval unchanged.
+void agent_option_forms_contract(const Context& base, const std::string& script_body)
+{
+    const auto prepare_with = [&](const std::string& options) {
+        Context prepared;
+        prepared.input = base.input;
+        const std::string script = script_body + options;
+        prepared.input.payload.find("launcher")->set("script_body", addon::Json_value(script));
+        prepared.input.payload.find("launcher_argv")->as_array().back() = addon::Json_value(script);
+        grok::handle_preparation(prepared);
+        return prepared;
+    };
+    const auto baseline = addon::decode_process_proposal(*base.output.find("process"), nullptr);
+    require(baseline && !baseline->argv.empty() && baseline->argv.back() == "stdio",
+        "agent option fixture must start with the existing stdio proposal");
+    const auto check = [&](const std::string& options, const std::vector<std::string>& forwarded) {
+        const auto prepared = prepare_with(options);
+        require(prepared.succeeded, "supported agent option spelling was refused");
+        const auto* value = prepared.output.find("process");
+        const auto process = value ? addon::decode_process_proposal(*value, nullptr) : std::nullopt;
+        auto expected = baseline->argv;
+        expected.pop_back();
+        expected.insert(expected.end(), forwarded.begin(), forwarded.end());
+        expected.push_back("stdio");
+        require(process && process->argv == expected && process->environment == baseline->environment,
+            "agent option normalization changed values, ordering, approval or environment");
+    };
+    for (const std::string option : {"--model", "-m", "--reasoning-effort", "--effort"}) {
+        const std::string value = option == "--model" || option == "-m" ? "grok-4.6" : "high";
+        for (const bool approving : {false, true}) {
+            const std::string approval = approving ? " --always-approve" : "";
+            std::vector<std::string> forwarded{option, value};
+            if (approving) forwarded.push_back("--always-approve");
+            check(" " + option + " " + value + approval, forwarded);
+            check(" " + option + "=" + value + approval, forwarded);
+        }
+    }
+    check(" --model=grok-4.6 --effort high", {"--model", "grok-4.6", "--effort", "high"});
+    check(" --model grok-4.6 --effort=high", {"--model", "grok-4.6", "--effort", "high"});
+    check(" --effort=low --effort high", {"--effort", "low", "--effort", "high"});
+    check(" --effort high --effort=low", {"--effort", "high", "--effort", "low"});
+    check(" --model=custom=model", {"--model", "custom=model"});
+    for (const std::string options : {
+        " --model", " --model=", " --effort", " --effort=", " --effort ''",
+        " --model --always-approve", " --model= --effort high"})
+    {
+        const auto refused = prepare_with(options);
+        require(!refused.succeeded && refused.output == addon::Json_value("invalid_launcher_option"),
+            "an absent agent option value must not consume another option");
+    }
+    for (const std::string options : {
+        " --permission-mode=acceptEdits", " --deny=Read", " --unknown=value", " --always-approve=false"})
+    {
+        const auto refused = prepare_with(options);
+        require(!refused.succeeded &&
+            refused.output == addon::Json_value("delegated_launcher_options_unavailable"),
+            "normalizing equals syntax must not admit unsupported agent options");
+    }
+}
+
 void managed_configuration_contract()
 {
 #ifdef _WIN32
@@ -353,6 +414,7 @@ int main(int argc, char** argv)
                 grok::handle_preparation(task);
                 require(task.succeeded && addon::validate_session_exchange_payload(task.output, &failure),
                     "session producer duplicated inherited and frozen assignments");
+                agent_option_forms_contract(task, launch.launcher.script_body);
                 if (delegated) {
                     const auto delegated_result = addon::decode_delegated_prepare_result(task.output, &failure);
                     require(delegated_result &&
