@@ -1,5 +1,7 @@
 # Logonomic Grok Build add-on
 
+[![Grok add-on CI](https://github.com/Varinomics/vnm_logonomic_cli_grok/actions/workflows/provider-ci.yml/badge.svg?branch=master)](https://github.com/Varinomics/vnm_logonomic_cli_grok/actions/workflows/provider-ci.yml)
+
 Standalone C++20 package `logonomic.cli.grok`, using the public Logonomic CLI
 add-on SDK. Windows/Linux x86-64 and macOS ARM64 artifacts are built separately.
 
