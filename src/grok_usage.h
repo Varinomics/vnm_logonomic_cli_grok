@@ -27,7 +27,8 @@ std::optional<logonomic::cli_addon::Usage_scan_page> scan_usage(
     const std::filesystem::path& vendor_profile,
     const std::filesystem::path& storage,
     const std::function<bool()>& cancelled,
-    std::string* error, const Usage_scan_limits& limits = {});
+    std::string* error, const Usage_scan_limits& limits = {},
+    const std::function<void()>& started = {});
 void handle_usage(logonomic::cli_addon::Invocation_context& context);
 
 } // namespace grok

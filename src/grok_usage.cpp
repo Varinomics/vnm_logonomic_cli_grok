@@ -1318,14 +1318,22 @@ addon::Usage_scan_page page_at(const fs::path& snapshot, const std::string& iden
 
 } // namespace
 
-std::optional<addon::Usage_scan_page> scan_usage(const addon::Usage_scan_request& request,
-    const fs::path& vendor_profile, const fs::path& storage, const std::function<bool()>& cancelled,
-    std::string* error, const Usage_scan_limits& limits)
+std::optional<addon::Usage_scan_page> scan_usage(
+    const addon::Usage_scan_request& request,
+    const fs::path& vendor_profile,
+    const fs::path& storage,
+    const std::function<bool()>& cancelled,
+    std::string* error,
+    const Usage_scan_limits& limits,
+    const std::function<void()>& started)
 {
     try {
         std::unique_lock lock(scan_mutex, std::defer_lock);
         while (!lock.try_lock_for(std::chrono::milliseconds(50))) check_cancel(cancelled);
         check_cancel(cancelled);
+        if (!request.snapshot_id && started) {
+            started();
+        }
         addon::Contract_failure failure;
         require(addon::validate_usage_cache_selection(request, &failure), "usage_cache_selection_invalid");
         const auto& selection = *request.cache_selection;
@@ -1437,8 +1445,12 @@ void handle_usage(addon::Invocation_context& context)
     if (!profile) return;
     if (!request->context.profile_storage) { context.fail(addon::Result_status::UNAVAILABLE, "profile_storage_unavailable"); return; }
     std::string error;
-    const auto page = scan_usage(*request, logonomic::cli_addon::path_from_utf8(profile->profile_path), logonomic::cli_addon::path_from_utf8(request->context.profile_storage->root),
-        [&context] { return context.cancel_requested(); }, &error);
+    const auto page = scan_usage(
+        *request,
+        addon::path_from_utf8(profile->profile_path),
+        addon::path_from_utf8(request->context.profile_storage->root),
+        [&context] { return context.cancel_requested(); }, &error, {},
+        [&context] { context.report_progress(0, std::nullopt); });
     if (!page) { context.fail(error == "cancelled" ? addon::Result_status::CANCELLED : addon::Result_status::FAILED, error); return; }
     context.succeed(addon::encode_usage_scan_result(*page, 3));
 }
