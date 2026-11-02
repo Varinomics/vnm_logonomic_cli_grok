@@ -76,7 +76,11 @@ Context prepare(const addon::Prepare_request& request)
 addon::Prepare_request with_arguments(addon::Prepare_request request, const std::vector<std::string>& arguments)
 {
     for (const auto& argument : arguments) {
-        request.launcher.script_body += " '" + argument + "'";
+        request.launcher.script_body += " \"";
+        for (const char character : argument) {
+            request.launcher.script_body += character == '"' ? "\"\"\"" : std::string(1, character);
+        }
+        request.launcher.script_body += '"';
         request.launcher_argv.push_back(argument);
     }
     return request;
@@ -122,7 +126,7 @@ void exercise(const std::string& executable)
     addon::Prepare_request direct;
     const auto program = addon::path_to_utf8(native);
     const auto profile = addon::path_to_utf8(root / "native");
-    direct.launcher = {"'" + program + "'", addon::k_runner_direct, {}};
+    direct.launcher = {"\"" + program + "\"", addon::k_runner_direct, {}};
     direct.launcher_argv     = {program};
     direct.working_directory = addon::path_to_utf8(root / "project");
     direct.launch_environment = addon::Launch_environment{addon::host_platform_id(), addon::Json_value::object(), {}};
@@ -141,6 +145,8 @@ void exercise(const std::string& executable)
 
     auto shell = configured;
     shell.launcher.runner_key = addon::k_runner_powershell;
+    shell.launcher.script_body = "& " + shell.launcher.script_body;
+    shell.launch_environment->platform_id = "windows-x86_64";
     shell.launcher_argv = {"powershell.exe", "-NoLogo", "-Command", shell.launcher.script_body};
     const auto policy = with_arguments(direct,
         {"--permission-mode", "acceptEdits", "--allow", "Read", "--deny", "Bash(rm *)", "--no-subagents"});
@@ -361,6 +367,9 @@ void exercise(const std::string& executable)
     auto unrecognized = requested;
     unrecognized.launcher.script_body += "; echo another command";
     require_refusal(unrecognized);
+    auto contradictory = requested;
+    contradictory.launcher_argv.back() = "different";
+    require_refusal(contradictory);
 
     // Short repeatable options fit the launcher's script bound while filling
     // the argv entry budget. Only adding the host's first message exceeds it.

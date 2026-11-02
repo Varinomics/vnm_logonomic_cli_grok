@@ -36,6 +36,7 @@ void exercise()
     environment.effective_environment.set("GROK_HOME", addon::Json_value("profiles/grok"));
     addon::Launcher_request launcher;
     launcher.script_body = "grok";
+    launcher.runner_key = addon::k_runner_direct;
     const auto base = std::filesystem::temp_directory_path().generic_string();
     std::string profile_error;
     const auto selected = grok::profile_selection(environment, launcher, base, base, &profile_error);
@@ -52,12 +53,13 @@ void exercise()
             ? std::filesystem::path(native_value) : std::filesystem::path(base) / native_value;
         check(projected && projected->adapter_account_key == grok::profile_account_key(expected.string()),
             "account must use frozen shell expansion, preserving quoted literal tilde");
-        const auto command = grok::recognize_launcher(launcher.script_body);
+        const auto command = grok::recognize_launcher(launcher, environment.platform_id);
         const auto assignments = grok::launcher_environment(*command, environment.effective_environment);
         check(assignments && *assignments == grok::Environment{{"GROK_HOME", native_value}},
             "process assignment must use frozen value rather than reparsed text");
     }
-    const auto custom = grok::recognize_launcher("CUSTOM_MODEL_KEY=~/key grok");
+    const auto custom = grok::recognize_launcher(
+        {"CUSTOM_MODEL_KEY=~/key grok", addon::k_runner_bash, {}}, environment.platform_id);
     check(!grok::launcher_environment(*custom, environment.effective_environment),
         "missing authored assignment evidence must not fall back to raw text");
     environment.effective_environment.set("CUSTOM_MODEL_KEY", addon::Json_value("/frozen/model-key"));

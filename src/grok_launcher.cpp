@@ -1,8 +1,8 @@
 #include "grok_launcher.h"
+#include "grok_launcher_approval.h"
 #include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <algorithm>
-#include <cctype>
 namespace grok {
 namespace addon = logonomic::cli_addon;
 namespace {
@@ -12,7 +12,6 @@ using addon::set_environment;
 using addon::resolve_program;
 using addon::native_image;
 using addon::path_to_utf8;
-using addon::base_name;
 
 } // namespace
 
@@ -23,48 +22,29 @@ std::optional<addon::Probe_output> run_probe(const std::vector<std::string>& arg
     return addon::probe(argv, environment, working_directory, timeout_ms, context);
 }
 
-std::vector<std::string> literal_launcher_argv(std::string_view script)
+std::optional<Launcher_command> recognize_launcher(
+    const addon::Launcher_request& launcher, std::string_view platform_id,
+    std::optional<std::span<const std::string>> host_argv)
 {
-    std::vector<std::string> result;
-    std::string word;
-    char quote = 0;
-    bool started = false;
-    for (char ch : script) {
-        if (ch == '\0' || ch == '\r' || ch == '\n') return {};
-        if (quote != '\'' && std::string_view("$`;&|<>").find(ch) != std::string_view::npos) return {};
-        if (ch == '\'' || ch == '"') {
-            if (quote == ch) quote = 0;
-            else if (quote == 0) quote = ch;
-            else word += ch;
-            started = true;
-        }
-        else if (!quote && std::isspace(static_cast<unsigned char>(ch))) {
-            if (started) { result.push_back(std::move(word)); word.clear(); started = false; }
-        }
-        else { word += ch; started = true; }
+    const auto invocation = addon::literal_launcher_invocation(launcher, platform_id, host_argv);
+    if (!invocation) {
+        return std::nullopt;
     }
-    if (quote) return {};
-    if (started) result.push_back(std::move(word));
-    return result;
-}
-
-std::optional<Launcher_command> recognize_launcher(std::string_view script)
-{
-    auto argv = literal_launcher_argv(script);
+    const bool windows = platform_id.starts_with("windows-");
+    const auto& program = invocation->argv.front();
+    const auto separator = program.find_last_of(windows ? "/\\" : "/");
+    auto name = program.substr(separator == std::string::npos ? 0 : separator + 1);
+    if (windows) {
+        name = lower(std::move(name));
+    }
+    const auto& names = launcher_approval_rules().program_names;
+    if (std::find(names.begin(), names.end(), name) == names.end()) {
+        return std::nullopt;
+    }
     Launcher_command result;
-    std::size_t index = 0;
-    while (index < argv.size()) {
-        const auto equal = argv[index].find('=');
-        if (equal == std::string::npos) break;
-        const auto name = argv[index].substr(0, equal);
-        if (name.empty() || !(std::isalpha(static_cast<unsigned char>(name[0])) || name[0] == '_') ||
-            !std::all_of(name.begin(), name.end(), [](unsigned char ch) { return std::isalnum(ch) || ch == '_'; })) return std::nullopt;
-        result.environment_names.push_back(name);
-        ++index;
-    }
-    if (index == argv.size() || base_name(argv[index]) != "grok") return std::nullopt;
-    result.program = argv[index++];
-    result.prefix_arguments.assign(argv.begin() + index, argv.end());
+    result.program = program;
+    result.prefix_arguments.assign(invocation->argv.begin() + 1, invocation->argv.end());
+    result.environment_names = invocation->environment_names;
     return result;
 }
 

@@ -99,7 +99,8 @@ void handle_probes(addon::Invocation_context& context)
             assign_environment(&result.process.environment, "GROK_HOME", selected->profile_path, windows);
         }
         else {
-            const auto command = recognize_launcher(request->context.launcher.script_body);
+            const auto command = recognize_launcher(
+                request->context.launcher, environment.platform_id, request->context.launcher_argv);
             if (!command) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_unrecognized"); return; }
             const auto argv = resolve_probe_launcher(*command, {"models"},
                 environment.effective_environment, request->context.working_directory);

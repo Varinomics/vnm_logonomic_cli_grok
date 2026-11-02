@@ -85,7 +85,7 @@ std::optional<Profile_selection> profile_selection(const addon::Launch_environme
     const addon::Launcher_request& launcher, std::string_view fallback,
     std::string_view normalization_directory, std::string* error)
 {
-    const auto command = recognize_launcher(launcher.script_body);
+    const auto command = recognize_launcher(launcher, environment.platform_id);
     if (!command) { *error = "launcher_unrecognized"; return std::nullopt; }
     if (!command->environment_names.empty() && launcher.runner_key != addon::k_runner_bash) {
         *error = "launcher_assignment_dialect_unavailable"; return std::nullopt;
@@ -121,7 +121,7 @@ std::optional<std::string> launch_profile_home(const addon::Session_launch_conte
     const auto& environment = *request.launch_environment;
     const bool windows = environment.platform_id.starts_with("windows-");
     auto raw = environment_value(environment.effective_environment, "GROK_HOME", windows);
-    const auto command = recognize_launcher(request.launcher.script_body);
+    const auto command = recognize_launcher(request.launcher, environment.platform_id, request.launcher_argv);
     if (!command) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_unrecognized"); return {}; }
     if (!command->environment_names.empty() && request.launcher.runner_key != addon::k_runner_bash) {
         context.fail(addon::Result_status::UNAVAILABLE, "launcher_assignment_dialect_unavailable"); return {};

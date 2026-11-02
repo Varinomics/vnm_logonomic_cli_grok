@@ -323,7 +323,8 @@ void prepare_delegated(addon::Invocation_context& context)
     if (request->purpose != addon::Structured_purpose::IMPLEMENTATION) {
         context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable"); return;
     }
-    const auto command = recognize_launcher(request->context.launcher.script_body);
+    const auto command = recognize_launcher(request->context.launcher,
+        request->context.launch_environment->platform_id, request->context.launcher_argv);
     const auto home = launch_profile_home(request->context, context);
     if (!home) return;
     if (!command) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_unavailable"); return; }
@@ -423,7 +424,8 @@ void prepare_resume(addon::Invocation_context& context)
         !id || !id->is_string() || !std::regex_match(id->as_string(), uuid)) {
         context.fail(addon::Result_status::FAILED, "invalid_resume_record"); return;
     }
-    const auto command = recognize_launcher(request->context.launcher.script_body);
+    const auto command = recognize_launcher(request->context.launcher,
+        request->context.launch_environment->platform_id, request->context.launcher_argv);
     const auto interactive = command
         ? interactive_arguments(command->prefix_arguments)
         : std::nullopt;
@@ -513,7 +515,8 @@ void handle_preparation(addon::Invocation_context& context)
     addon::Contract_failure failure;
     const auto request = addon::decode_prepare_request(context.request().payload, &failure, 3);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
-    const auto command = recognize_launcher(request->launcher.script_body);
+    const auto command = recognize_launcher(request->launcher, request->launch_environment->platform_id,
+        request->launcher_argv);
     const auto interactive = command
         ? interactive_arguments(command->prefix_arguments, request->initial_prompt.has_value())
         : std::nullopt;
