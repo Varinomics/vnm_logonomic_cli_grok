@@ -2,6 +2,8 @@
 
 #if defined(__linux__) || defined(__APPLE__)
 
+#include "grok_wake_termination.h"
+
 #include <fcntl.h>
 #include <poll.h>
 #if defined(__APPLE__)
@@ -251,6 +253,9 @@ public:
 
     bool start(const std::vector<std::string>& native_argv)
     {
+        if (Wake_termination::requested()) {
+            return false;
+        }
         m_listener.reset(open_socket());
         const std::string channel_path = m_directory + "/control.sock";
         const auto address = socket_address(channel_path);
@@ -272,6 +277,9 @@ public:
 
         const auto deadline = Clock::now() + std::chrono::seconds(10);
         while (true) {
+            if (Wake_termination::requested()) {
+                return false;
+            }
             if (collect_exit(m_leader).has_value()) return false;
             struct stat endpoint{};
             if (::lstat(leader_path.c_str(), &endpoint) == 0 &&
@@ -293,10 +301,16 @@ public:
         {
             return false;
         }
+        if (Wake_termination::requested()) {
+            return false;
+        }
         m_control = spawn_native(
             {native_argv.front(), "agent", "--leader", "--leader-socket", leader_path, "stdio"},
             native_channel.get(), native_channel.get(), null_stream.get());
         if (m_control < 0) return false;
+        if (Wake_termination::requested()) {
+            return false;
+        }
         std::vector<std::string> tui{native_argv.front(), "--leader", "--leader-socket", leader_path};
         tui.insert(tui.end(), native_argv.begin() + 1, native_argv.end());
         m_tui = spawn_native(tui, -1, -1, -1);
@@ -474,7 +488,9 @@ std::unique_ptr<Wake_runtime> start_wake_runtime(
         // The original terminal owner must settle all admitted descendants
         // before another native execution can start. An exec fallback here
         // would keep that owner's root alive and postpone its settlement.
-        std::fputs("Grok's isolated session could not start; closing its admitted native processes.\n", stderr);
+        if (!Wake_termination::requested()) {
+            std::fputs("Grok's isolated session could not start; closing its admitted native processes.\n", stderr);
+        }
         runtime->fail_start();
     }
     return runtime;

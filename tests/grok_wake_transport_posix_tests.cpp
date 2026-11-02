@@ -4,16 +4,22 @@
 
 #include <logonomic_cli_addon/ids.h>
 #include <fcntl.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -78,6 +84,7 @@ int native_fixture(const std::vector<std::string>& arguments)
     if (socket_path.empty()) return 2;
     const auto directory = fs::path(socket_path).parent_path();
     if (arguments.back() == "stdio") {
+        std::ofstream(directory / "fixture-control.pid") << ::getpid();
         std::string line;
         while (std::getline(std::cin, line)) {
             if (line == "close-control") {
@@ -92,6 +99,11 @@ int native_fixture(const std::vector<std::string>& arguments)
     }
     const bool leader = std::find(arguments.begin(), arguments.end(), "leader") != arguments.end();
     std::ofstream(directory / (leader ? "fixture-leader.pid" : "fixture-tui.pid")) << ::getpid();
+    if (leader && std::getenv("GROK_TEST_HOLD_LEADER")) {
+        while (true) {
+            ::pause();
+        }
+    }
     int listener = -1;
     if (leader) {
         listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -121,7 +133,9 @@ public:
     ~Fixture()
     {
         m_runtime.reset();
-        for (const auto* name : {"fixture-leader.pid", "fixture-tui.pid", "fixture-control-closed"}) {
+        for (const auto* name : {
+            "fixture-leader.pid", "fixture-control.pid", "fixture-tui.pid", "fixture-control-closed"})
+        {
             (void)::unlink((m_directory + "/" + name).c_str());
         }
         (void)::rmdir(m_directory.c_str());
@@ -249,12 +263,156 @@ void unavailable_and_exit_contract(const std::string& executable)
     require(exited == 125, "leader loss terminates original runtime instead of reconnecting");
 }
 
+class Bridge_process
+{
+public:
+    Bridge_process(
+        const std::string& bridge, const std::string& native, bool hold_leader, bool ignore_interrupt = false)
+
+    :
+        m_token(unique_token()),
+        m_directory(directory_for(m_token))
+    {
+        m_pid = ::fork();
+        require(m_pid >= 0, "fork isolated bridge fixture");
+        if (m_pid == 0) {
+            // An isolated fixture group lets failure cleanup settle its children
+            // without addressing any process in the surrounding test runner.
+            if (::setpgid(0, 0) != 0) {
+                ::_exit(126);
+            }
+            sigset_t signals;
+            ::sigemptyset(&signals);
+            for (const int signal : {SIGHUP, SIGINT, SIGTERM}) {
+                struct sigaction action{};
+                action.sa_handler = ignore_interrupt && signal == SIGINT ? SIG_IGN : SIG_DFL;
+                ::sigemptyset(&action.sa_mask);
+                if (::sigaction(signal, &action, nullptr) != 0) {
+                    ::_exit(126);
+                }
+                ::sigaddset(&signals, signal);
+            }
+            if (::sigprocmask(SIG_UNBLOCK, &signals, nullptr) != 0) {
+                ::_exit(126);
+            }
+            if (hold_leader) {
+                ::setenv("GROK_TEST_HOLD_LEADER", "1", 1);
+            }
+            else {
+                ::unsetenv("GROK_TEST_HOLD_LEADER");
+            }
+            ::execl(bridge.c_str(), bridge.c_str(), "--serve", m_token.c_str(), native.c_str(), nullptr);
+            ::_exit(127);
+        }
+    }
+
+    ~Bridge_process()
+    {
+        // await_exit deliberately leaves the bridge waitable, so its PID and
+        // group identity cannot be reused before this fixture-owned cleanup.
+        (void)::kill(-m_pid, SIGKILL);
+        (void)::kill(m_pid, SIGKILL);
+        int status = 0;
+        while (::waitpid(m_pid, &status, 0) < 0 && errno == EINTR) {}
+        while (::waitpid(-m_pid, &status, 0) > 0 || errno == EINTR) {}
+        for (const auto* name : {
+            "control.sock", "leader.sock", "leader.lock", "fixture-leader.pid",
+            "fixture-control.pid", "fixture-tui.pid"})
+        {
+            (void)::unlink((m_directory + "/" + name).c_str());
+        }
+        (void)::rmdir(m_directory.c_str());
+    }
+
+    std::vector<pid_t> await_native(bool hold_leader) const
+    {
+        std::vector<pid_t> children;
+        const auto deadline = Clock::now() + std::chrono::seconds(4);
+        for (const auto* role : {"leader", "control", "tui"}) {
+            const auto path = m_directory + "/fixture-" + role + ".pid";
+            pid_t pid = -1;
+            while (Clock::now() < deadline && pid <= 1) {
+                std::ifstream(path) >> pid;
+                if (pid <= 1) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            }
+            require(pid > 1, "bridge admits expected inert native child");
+            children.push_back(pid);
+            require(::unlink(path.c_str()) == 0, "remove fixture marker before runtime cleanup");
+            if (hold_leader) {
+                break;
+            }
+        }
+        return children;
+    }
+
+    siginfo_t await_exit() const
+    {
+        const auto deadline = Clock::now() + std::chrono::seconds(3);
+        while (Clock::now() < deadline) {
+            siginfo_t status{};
+            require(::waitid(P_PID, m_pid, &status, WEXITED | WNOHANG | WNOWAIT) == 0,
+                "observe bridge exit without releasing its process identity");
+            if (status.si_pid == m_pid) {
+                return status;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        throw std::runtime_error("signal did not promptly stop the bridge");
+    }
+
+    const std::string m_token;
+    const std::string m_directory;
+    pid_t m_pid = -1;
+};
+
+void bridge_signal_contract(const std::string& executable, const std::string& bridge)
+{
+#if defined(__linux__)
+    // Reap the fixture's orphaned descendants even when testing a broken bridge.
+    require(::prctl(PR_SET_CHILD_SUBREAPER, 1) == 0, "fixture can reap its orphaned native children");
+#endif
+    Fixture peer(executable);
+    for (const bool hold_leader : {false, true}) {
+        for (const int signal : {SIGHUP, SIGINT, SIGTERM}) {
+            Bridge_process process(bridge, executable, hold_leader);
+            const auto children = process.await_native(hold_leader);
+            require(::kill(process.m_pid, signal) == 0, "signal only the owned bridge root");
+            const auto status = process.await_exit();
+            require(status.si_code == CLD_KILLED && status.si_status == signal,
+                "cleanup preserves the original terminating signal");
+            require(!fs::exists(process.m_directory), "signal removes the owned wake runtime directory");
+            for (const auto child : children) {
+                require(::kill(child, 0) < 0 && errno == ESRCH,
+                    "bridge settles and reaps every admitted direct child before exiting");
+            }
+            require(fs::exists(peer.m_directory + "/control.sock") &&
+                !peer.m_runtime->poll().exit_code.has_value(),
+                "signal cleanup preserves the separate live wake runtime");
+        }
+    }
+
+    Bridge_process ignored(bridge, executable, false, true);
+    (void)ignored.await_native(false);
+    require(::kill(ignored.m_pid, SIGINT) == 0, "send an inherited ignored signal");
+    Test_context context;
+    const auto response = grok::exchange_wake_request(
+        ignored.m_token, R"({"operation":"inspect","payload":{}})", context);
+    require(response.response.has_value(), "inherited SIG_IGN remains ignored while serving requests");
+    require(::kill(ignored.m_pid, SIGTERM) == 0, "terminate the ignored-interrupt fixture");
+    const auto status = ignored.await_exit();
+    require(status.si_code == CLD_KILLED && status.si_status == SIGTERM &&
+        !fs::exists(ignored.m_directory), "other signals still clean up an ignored-interrupt launch");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     std::vector<std::string> arguments(argv, argv + argc);
-    if (argc > 1) return native_fixture(arguments);
+    const bool bridge_contract = argc == 3 && arguments[1] == "--session-bridge";
+    if (argc > 1 && !bridge_contract) return native_fixture(arguments);
     try {
         require(std::signal(SIGPIPE, SIG_DFL) != SIG_ERR, "SIGPIPE has its default disposition");
         sigset_t signals;
@@ -268,6 +426,9 @@ int main(int argc, char** argv)
         transport_contract(executable);
         uncertain_delivery_contract(executable);
         unavailable_and_exit_contract(executable);
+        if (bridge_contract) {
+            bridge_signal_contract(executable, arguments[2]);
+        }
         std::cout << "POSIX wake transport contracts passed\n";
         return 0;
     }

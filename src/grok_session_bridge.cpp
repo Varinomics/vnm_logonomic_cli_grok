@@ -1,6 +1,7 @@
 #include "grok_wake_protocol.h"
 #include "grok_wake_transport.h"
 #include "grok_wake_identity.h"
+#include "grok_wake_termination.h"
 #include "grok_json.h"
 #include <logonomic_cli_addon/helper_client.h>
 #include <logonomic_cli_addon/ids.h>
@@ -47,10 +48,14 @@ addon::Session_wake_notify_result native_result(const Wake_result& result)
 int serve(const std::string& token, const std::vector<std::string>& native_argv)
 {
     auto runtime = start_wake_runtime(token, native_argv);
+    if (Wake_termination::requested()) {
+        return 125;
+    }
     if (!runtime) {
         // Unsupported native configuration (including a sandbox which cannot
         // use a leader) preserves the launch's original standalone semantics.
         // No private endpoint remains, so the host observes wake unavailable.
+        Wake_termination::before_standalone();
         return run_standalone_native(native_argv);
     }
     Wake_protocol protocol;
@@ -71,9 +76,12 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
             }
         }
         for (const auto& event : exchange.interactions) {
+            if (Wake_termination::requested()) {
+                return;
+            }
             if (!helper_environment || identity.transition_nonce().empty()) continue;
             const auto deadline = Clock::now() + std::chrono::milliseconds(1800);
-            const auto cancelled = [&] { return Clock::now() >= deadline; };
+            const auto cancelled = [&] { return Wake_termination::requested() || Clock::now() >= deadline; };
             addon::Helper_client client(*helper_environment, cancelled);
             const auto key = addon::random_nonce_hex();
             // This is the admitted SessionStart nonce, not a native request ID.
@@ -87,7 +95,13 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
         }
     };
     const auto send = [&](Wake_exchange exchange) {
+        if (Wake_termination::requested()) {
+            return;
+        }
         consume_results(exchange);
+        if (Wake_termination::requested()) {
+            return;
+        }
         if (!exchange.stdin_bytes.empty()) {
             if (exchange.writes_prompt) protocol.prompt_write_started();
             if (!runtime->write_control(exchange.stdin_bytes))
@@ -96,6 +110,9 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
     };
     if (!runtime->write_control(protocol.initialize())) protocol.transport_closed("native_initialize_write_failed");
     for (;;) {
+        if (Wake_termination::requested()) {
+            return 125;
+        }
         const auto events = runtime->poll();
         if (events.exit_code) return *events.exit_code;
         if (events.request_disconnected && request) {
@@ -203,7 +220,10 @@ int wmain(int argc, wchar_t** argv)
 int main(int argc, char** argv)
 {
     if (argc < 4 || std::string_view(argv[1]) != "--serve") return 2;
-    try { return grok::serve(argv[2], std::vector<std::string>(argv + 3, argv + argc)); }
+    try {
+        grok::Wake_termination termination;
+        return grok::serve(argv[2], std::vector<std::string>(argv + 3, argv + argc));
+    }
     catch (...) { return 3; }
 }
 #endif
