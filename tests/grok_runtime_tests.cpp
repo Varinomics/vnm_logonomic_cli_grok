@@ -96,6 +96,49 @@ void launcher_approval_contract()
         "Grok account management remains unchanged");
 }
 
+void native_launcher_options_contract()
+{
+    // PagerArgs in xai-org/grok-build at 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8
+    // declares these options and aliases. Approval edits must retain their text.
+    const auto& rules = grok::launcher_approval_rules();
+    for (const std::string options : {
+        "--no-leader",
+        "--reasoning-effort high",
+        "--reasoning-effort=high",
+        "--worktree feature --worktree-ref main",
+        "--append-system-prompt \"keep --always-approve as text\"",
+        "--system-prompt=\"keep --always-approve as text\"",
+        "--allowedTools \"Read,Edit\"",
+        "--disallowedTools=\"Bash(rm *)\""})
+    {
+        const std::string source = "grok " + options;
+        const auto enabled = addon::transform_launcher_approval(
+            {{source, "direct", "PROFILE=work"}, "linux-x86_64", addon::Launcher_approval_action::YOLOFY}, rules);
+        require(enabled.disposition == addon::Launcher_approval_disposition::CHANGED &&
+            enabled.script_body == "grok --always-approve " + options,
+            "Yolofy must recognize native options and preserve their values");
+        const auto repeated = addon::transform_launcher_approval(
+            {{enabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64", addon::Launcher_approval_action::YOLOFY}, rules);
+        require(repeated.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+            repeated.script_body == enabled.script_body, "Native option approval editing must be idempotent");
+        const auto disabled = addon::transform_launcher_approval(
+            {{enabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64", addon::Launcher_approval_action::UNYOLOFY}, rules);
+        require(disabled.disposition == addon::Launcher_approval_disposition::CHANGED && disabled.script_body == source,
+            "Unyolofy must retain native options and approval-looking text inside their values");
+        const auto plain_key = addon::launcher_approval_comparison_key(
+            {{source, "direct", "PROFILE=work"}, "linux-x86_64"}, rules);
+        const auto approval_key = addon::launcher_approval_comparison_key(
+            {{enabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64"}, rules);
+        require(plain_key.supported && approval_key.supported && plain_key.key == approval_key.key,
+            "Native option spelling must retain approval-independent launcher identity");
+    }
+    const auto unknown = addon::transform_launcher_approval(
+        {{"grok --unknown-future-option value", "direct", ""}, "linux-x86_64",
+            addon::Launcher_approval_action::YOLOFY}, rules);
+    require(unknown.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,
+        "Unrecognized native options must still refuse approval editing");
+}
+
 addon::Classify_event_request event(std::string name)
 {
     addon::Classify_event_request request;
@@ -128,6 +171,166 @@ public:
     }
     bool finished() const override { return done; }
 };
+
+void standalone_launch_contract(const addon::Prepare_request& base)
+{
+    // Native PagerArgs::no_leader is a clap SetTrue flag with no self override.
+    // Add one selector when absent; preserve authored duplicates for native rejection.
+    const std::vector<std::pair<std::vector<std::string>, std::size_t>> cases{
+        {{}, 1},
+        {{"--no-leader"}, 1},
+        {{"--no-leader", "--no-leader"}, 2},
+        {{"--rules=--no-leader"}, 1},
+        {{"--model", "grok-4.6", "--no-leader", "--effort", "high"}, 1},
+    };
+    for (const auto& [arguments, expected_count] : cases) {
+        auto request = base;
+        const auto program = base.launcher_argv.front();
+        request.launcher.script_body = "\"" + program + "\"";
+        request.launcher_argv = {program};
+        for (const auto& argument : arguments) {
+            request.launcher.script_body += " \"" + argument + "\"";
+            request.launcher_argv.push_back(argument);
+        }
+        Context prepared;
+        prepared.input = {"standalone", {"launch-preparation", 3}, "prepare",
+            addon::encode_prepare_request(request, 3)};
+        grok::handle_preparation(prepared);
+        const auto patch = addon::decode_launch_patch(prepared.output, nullptr, 3);
+        require(prepared.succeeded && patch && patch->argv && patch->apply_managed_configuration,
+            "Standalone fixture must produce a managed native launch");
+        require(static_cast<std::size_t>(std::count(patch->argv->begin(), patch->argv->end(), "--no-leader")) == expected_count,
+            "Ordinary preparation must add --no-leader only when absent as an option");
+        require(patch->argv->size() >= arguments.size() + 1 &&
+            std::equal(arguments.rbegin(), arguments.rend(), patch->argv->rbegin()),
+            "Ordinary preparation must preserve the authored native arguments");
+
+        addon::Resume_prepare_request resume;
+        resume.context.launcher = request.launcher;
+        resume.context.launcher_argv = request.launcher_argv;
+        resume.context.working_directory = request.working_directory;
+        resume.context.launch_environment = request.launch_environment;
+        resume.context.account_context = request.account_context;
+        const std::string session_id = "8e18215e-f612-4131-95dd-7890139a41ae";
+        resume.resume_record.set("provider_session_id", addon::Json_value(session_id));
+        Context resumed;
+        resumed.input = {"standalone-resume", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(resume, 2)};
+        grok::handle_preparation(resumed);
+        const auto result = addon::decode_resume_prepare_result(resumed.output, nullptr, 2);
+        require(resumed.succeeded && result, "Standalone fixture must produce an exact native resume");
+        const auto& resumed_argv = result->process.argv;
+        require(static_cast<std::size_t>(std::count(resumed_argv.begin(), resumed_argv.end(), "--no-leader")) == expected_count,
+            "Resume preparation must add --no-leader only when absent as an option");
+        require(resumed_argv.size() >= arguments.size() + 3 &&
+            std::equal(arguments.begin(), arguments.end(), resumed_argv.begin() + 1) &&
+            resumed_argv[resumed_argv.size() - 2] == "--resume" && resumed_argv.back() == session_id,
+            "Resume preparation must preserve authored arguments and the exact session identity");
+    }
+}
+
+void launcher_argument_semantics_contract(const addon::Prepare_request& base)
+{
+    struct Launcher_case
+    {
+        std::string runner;
+        std::string options;
+        std::vector<std::string> arguments;
+    };
+    const std::vector<Launcher_case> cases{
+        {addon::k_runner_direct, R"( --append-system-prompt """quoted""")",
+            {"--append-system-prompt", "\"quoted\""}},
+        {addon::k_runner_bash, R"( --append-system-prompt "one\\two")",
+            {"--append-system-prompt", R"(one\two)"}},
+        {addon::k_runner_powershell, R"( --append-system-prompt 'Don''t guess')",
+            {"--append-system-prompt", "Don't guess"}},
+    };
+    for (const auto& item : cases) {
+        auto request = base;
+        request.launcher.runner_key = item.runner;
+        const auto& program = base.launcher_argv.front();
+        const auto script_program = item.runner == addon::k_runner_bash
+            ? std::filesystem::path(program).generic_string() : program;
+        request.launcher.script_body =
+            (item.runner == addon::k_runner_powershell ? "& \"" : "\"") + script_program + "\"" + item.options;
+        if (item.runner == addon::k_runner_direct) {
+            request.launcher_argv = {program};
+            request.launcher_argv.insert(request.launcher_argv.end(), item.arguments.begin(), item.arguments.end());
+        }
+        else
+        if (item.runner == addon::k_runner_bash) {
+            request.launcher_argv = {"bash",
+                request.launch_environment->platform_id.starts_with("linux-") ? "-c" : "-lc",
+                request.launcher.script_body};
+        }
+        else {
+            // Pure Windows runner projection; this fixture never starts PowerShell.
+            request.launch_environment->platform_id = "windows-x86_64";
+            request.launcher_argv = {"powershell.exe", "-NoLogo", "-Command", request.launcher.script_body};
+        }
+        Context prepared;
+        prepared.input = {"literal", {"launch-preparation", 3}, "prepare",
+            addon::encode_prepare_request(request, 3)};
+        grok::handle_preparation(prepared);
+        const auto patch = addon::decode_launch_patch(prepared.output, nullptr, 3);
+        require(prepared.succeeded && patch && patch->argv && patch->apply_managed_configuration &&
+            patch->argv->size() == item.arguments.size() + 2 &&
+            std::equal(item.arguments.begin(), item.arguments.end(), patch->argv->begin() + 2),
+            "Managed preparation must preserve the selected runner's native argument bytes");
+
+        addon::Resume_prepare_request resume;
+        resume.context.launcher = request.launcher;
+        resume.context.launcher_argv = request.launcher_argv;
+        resume.context.working_directory = request.working_directory;
+        resume.context.launch_environment = request.launch_environment;
+        resume.context.account_context = request.account_context;
+        resume.resume_record.set("provider_session_id", addon::Json_value("8e18215e-f612-4131-95dd-7890139a41ae"));
+        Context resumed;
+        resumed.input = {"literal-resume", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(resume, 2)};
+        grok::handle_preparation(resumed);
+        const auto result = addon::decode_resume_prepare_result(resumed.output, nullptr, 2);
+        require(resumed.succeeded && result && result->process.argv.size() == item.arguments.size() + 4 &&
+            std::equal(item.arguments.begin(), item.arguments.end(), result->process.argv.begin() + 1),
+            "Resume must use the same runner-aware recognition and preserve native values");
+
+#if defined(__linux__)
+        if (item.runner == addon::k_runner_bash) {
+            auto environment = addon::environment_pairs(request.launch_environment->effective_environment);
+            addon::set_environment(environment, "GROK_ARGUMENT_CAPTURE", "1");
+            auto shell_argv = request.launcher_argv;
+            const auto bash = addon::resolve_program("bash", environment, request.working_directory);
+            require(bash.has_value(), "The Linux native-word oracle requires bash");
+            shell_argv.front() = addon::path_to_utf8(*bash);
+            const auto native = grok::run_probe(shell_argv, environment, request.working_directory, 1000, prepared);
+            const auto words = native ? addon::parse_json(native->output, {}, nullptr) : std::nullopt;
+            auto expected = addon::Json_value::array();
+            for (const auto& argument : item.arguments) {
+                expected.push_back(addon::Json_value(argument));
+            }
+            require(words && *words == expected, "The parser's expected Bash words must agree with native Bash");
+        }
+#endif
+        auto mismatch = request;
+        mismatch.launcher_argv.back() += " changed";
+        Context unmanaged;
+        unmanaged.input = {"mismatched-host", {"launch-preparation", 3}, "prepare",
+            addon::encode_prepare_request(mismatch, 3)};
+        grok::handle_preparation(unmanaged);
+        const auto retained = addon::decode_launch_patch(unmanaged.output, nullptr, 3);
+        require(unmanaged.succeeded && retained && !retained->argv && !retained->apply_managed_configuration &&
+            retained->disposition && !retained->disposition->prepared,
+            "Contradictory host evidence must preserve the original unmanaged invocation");
+        resume.context.launcher_argv = mismatch.launcher_argv;
+        Context refused;
+        refused.input = {"mismatched-resume", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(resume, 2)};
+        grok::handle_preparation(refused);
+        require(!refused.succeeded && refused.status == addon::Result_status::UNAVAILABLE,
+            "Resume must refuse contradictory host invocation evidence");
+    }
+}
+
 // The public structured and delegated entry points share agent preparation.
 // Equivalent native spellings must keep values, order and approval unchanged.
 void agent_option_forms_contract(const Context& base, const std::string& script_body)
@@ -245,8 +448,17 @@ int main(int argc, char** argv)
     if (argc == 2 && std::string(argv[1]) == "--help") {
         std::cout << "Grok Build --session-id --resume\n"; return 0;
     }
+    if (std::getenv("GROK_ARGUMENT_CAPTURE")) {
+        auto words = addon::Json_value::array();
+        for (int index = 1; index < argc; ++index) {
+            words.push_back(addon::Json_value(argv[index]));
+        }
+        std::cout << addon::serialize_json(words) << '\n';
+        return 0;
+    }
     try {
         launcher_approval_contract();
+        native_launcher_options_contract();
         managed_configuration_contract();
         require(grok::wake_compatible_arguments({"--model", "grok-4.6", "--effort=high"}),
             "native model options rejected by wake launch");
@@ -265,12 +477,16 @@ int main(int argc, char** argv)
             require(retained.session_wake && !retained.session_wake->available && retained.argv == original,
                 "unavailable wake changed original standalone invocation");
         }
-        const auto launcher = grok::recognize_launcher("GROK_HOME='profiles/../selected' grok --model grok-4.6");
+        const auto launcher = grok::recognize_launcher(
+            {"GROK_HOME='profiles/../selected' grok --model grok-4.6", addon::k_runner_bash, {}}, "linux-x86_64");
         require(launcher && launcher->environment_names == std::vector<std::string>{"GROK_HOME"}, "authored assignment name lost");
         require(launcher->prefix_arguments == std::vector<std::string>{"--model", "grok-4.6"}, "model arguments lost");
-        require(!grok::recognize_launcher("grok; echo hidden"), "shell chain admitted");
-        require(!grok::recognize_launcher("grok $(hidden)"), "shell substitution admitted");
-        require(!grok::recognize_launcher("grok '\""), "unclosed quote admitted");
+        for (const auto* script : {"grok; echo hidden", "grok $(hidden)", "grok '\""}) {
+            require(!grok::recognize_launcher({script, addon::k_runner_bash, {}}, "linux-x86_64"),
+                "Unsupported Bash syntax must remain a shell invocation");
+        }
+        require(!grok::recognize_launcher({"'grok'", addon::k_runner_direct, {}}, "linux-x86_64"),
+            "Direct single quotes are program bytes, not shell quoting");
         const auto config = addon::parse_json(grok::hook_configuration(), {}, nullptr);
         require(config && config->find("hooks"), "native hooks object missing");
         const auto* pretool = config->find("hooks")->find("PreToolUse");
@@ -297,7 +513,7 @@ int main(int argc, char** argv)
         fs::permissions(fake, fs::perms::owner_exec, fs::perm_options::add);
 #endif
         addon::Prepare_request preparation;
-        preparation.launcher.script_body = "'" + fake.generic_string() + "' --model grok-4.6";
+        preparation.launcher.script_body = "\"" + fake.string() + "\" --model grok-4.6";
         preparation.launcher.runner_key = addon::k_runner_direct;
         preparation.launcher_argv = {fake.string(), "--model", "grok-4.6"};
         preparation.working_directory = root.string();
@@ -339,11 +555,15 @@ int main(int argc, char** argv)
             std::find(patch->argv->begin(), patch->argv->end(), "grok-4.6") != patch->argv->end(), "prepared native model/options lost");
         require(std::find(patch->set.begin(), patch->set.end(), std::pair<std::string, std::string>{"GROK_HOME", "profiles/./native"}) != patch->set.end(),
             "native profile spelling changed during preparation");
+        standalone_launch_contract(preparation);
+        launcher_argument_semantics_contract(preparation);
         for (const std::string raw : {"~/selected", "'~/selected'", "\"~/selected\""}) {
             const std::string frozen = raw.front() == '~' ? (root / "expanded" / "selected").string() : "~/selected";
             preparation.launcher.runner_key = addon::k_runner_bash;
             preparation.launcher.script_body = "GROK_HOME=" + raw + " CUSTOM_MODEL_KEY=~/key '" + fake.generic_string() + "'";
-            preparation.launcher_argv = {"bash", "-c", preparation.launcher.script_body};
+            preparation.launcher_argv = {"bash",
+                preparation.launch_environment->platform_id.starts_with("linux-") ? "-c" : "-lc",
+                preparation.launcher.script_body};
             preparation.launch_environment->effective_environment.set("GROK_HOME", addon::Json_value(frozen));
             preparation.launch_environment->effective_environment.set("CUSTOM_MODEL_KEY", addon::Json_value("/frozen/key"));
             const auto profile = fs::path(frozen).is_absolute() ? fs::path(frozen) : root / frozen;

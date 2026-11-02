@@ -39,10 +39,17 @@ bool environment_name_equal(std::string_view left, std::string_view right)
     }
     return true;
 }
-bool interactive_arguments(const std::vector<std::string>& arguments, bool fresh_session = false)
+struct interactive_arguments_t
+{
+    bool no_leader = false;
+};
+
+std::optional<interactive_arguments_t> interactive_arguments(
+    const std::vector<std::string>& arguments, bool fresh_session = false)
 {
     // A subcommand or single-shot request has a different lifetime and output
     // contract. Preserve all native interactive option values verbatim.
+    interactive_arguments_t result;
     std::vector<std::string> values{
         "--model", "-m", "--cwd", "--rules", "--append-system-prompt", "--system-prompt",
         "--resume", "-r", "--load", "--session-id", "-s", "--agent", "--agents",
@@ -58,23 +65,29 @@ bool interactive_arguments(const std::vector<std::string>& arguments, bool fresh
         if (option == "--single" || option == "--print" || option == "-p" ||
             option == "--prompt-file" || option == "--prompt-json" || option == "--version" ||
             option == "--help" || option == "-h" || option == "-v" || option == "-V" ||
-            option == "--leader" || argument.empty() || argument[0] != '-') return false;
+            option == "--leader" || argument.empty() || argument[0] != '-')
+        {
+            return std::nullopt;
+        }
         if (fresh_session &&
             (option == "--resume" || option == "-r" || option == "--load" ||
                 option == "--continue" || option == "-c" || option == "--fork-session"))
         {
-            return false;
+            return std::nullopt;
         }
         if (std::find(values.begin(), values.end(), option) != values.end() && argument.find('=') == std::string::npos) {
             if (i + 1 == arguments.size() || arguments[i + 1].starts_with('-')) {
                 if (option == "--resume" || option == "-r" ||
                     (fresh_session && (option == "--worktree" || option == "-w"))) continue;
-                return false;
+                return std::nullopt;
             }
             ++i;
         }
+        if (argument == "--no-leader") {
+            result.no_leader = true;
+        }
     }
-    return true;
+    return result;
 }
 
 bool verbatim_initial_prompt(std::string_view text)
@@ -310,7 +323,8 @@ void prepare_delegated(addon::Invocation_context& context)
     if (request->purpose != addon::Structured_purpose::IMPLEMENTATION) {
         context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable"); return;
     }
-    const auto command = recognize_launcher(request->context.launcher.script_body);
+    const auto command = recognize_launcher(request->context.launcher,
+        request->context.launch_environment->platform_id, request->context.launcher_argv);
     const auto home = launch_profile_home(request->context, context);
     if (!home) return;
     if (!command) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_unavailable"); return; }
@@ -410,8 +424,12 @@ void prepare_resume(addon::Invocation_context& context)
         !id || !id->is_string() || !std::regex_match(id->as_string(), uuid)) {
         context.fail(addon::Result_status::FAILED, "invalid_resume_record"); return;
     }
-    const auto command = recognize_launcher(request->context.launcher.script_body);
-    if (!command || !interactive_arguments(command->prefix_arguments)) {
+    const auto command = recognize_launcher(request->context.launcher,
+        request->context.launch_environment->platform_id, request->context.launcher_argv);
+    const auto interactive = command
+        ? interactive_arguments(command->prefix_arguments)
+        : std::nullopt;
+    if (!interactive) {
         context.fail(addon::Result_status::UNAVAILABLE, "resume_launcher_unavailable"); return;
     }
     for (const auto& argument : command->prefix_arguments) {
@@ -426,7 +444,10 @@ void prepare_resume(addon::Invocation_context& context)
     const auto assignments = launcher_environment(*command, request->context.launch_environment->effective_environment);
     if (!assignments) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_environment_unavailable"); return; }
     auto arguments = command->prefix_arguments;
-    arguments.insert(arguments.end(), {"--no-leader", "--resume", id->as_string()});
+    if (!interactive->no_leader) {
+        arguments.push_back("--no-leader");
+    }
+    arguments.insert(arguments.end(), {"--resume", id->as_string()});
     const auto argv = resolve_probe_launcher(*command, arguments,
         request->context.launch_environment->effective_environment, request->context.working_directory);
     if (!argv) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable"); return; }
@@ -494,9 +515,11 @@ void handle_preparation(addon::Invocation_context& context)
     addon::Contract_failure failure;
     const auto request = addon::decode_prepare_request(context.request().payload, &failure, 3);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
-    const auto command = recognize_launcher(request->launcher.script_body);
-    const bool interactive = command && interactive_arguments(
-        command->prefix_arguments, request->initial_prompt.has_value());
+    const auto command = recognize_launcher(request->launcher, request->launch_environment->platform_id,
+        request->launcher_argv);
+    const auto interactive = command
+        ? interactive_arguments(command->prefix_arguments, request->initial_prompt.has_value())
+        : std::nullopt;
     if (request->initial_prompt &&
         (!interactive || !verbatim_initial_prompt(request->initial_prompt->text)))
     {
@@ -551,10 +574,7 @@ void handle_preparation(addon::Invocation_context& context)
     auto argv = *program;
     // Standalone execution keeps this launch out of an unrelated persistent
     // leader and makes its environment visible to its own native hooks.
-    if (!request->initial_prompt ||
-        std::find(command->prefix_arguments.begin(), command->prefix_arguments.end(), "--no-leader") ==
-            command->prefix_arguments.end())
-    {
+    if (!interactive->no_leader) {
         argv.push_back("--no-leader");
     }
     argv.insert(argv.end(), command->prefix_arguments.begin(), command->prefix_arguments.end());

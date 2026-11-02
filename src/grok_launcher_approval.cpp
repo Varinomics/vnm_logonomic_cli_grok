@@ -13,15 +13,16 @@ const logonomic::cli_addon::Launcher_approval_rules& launcher_approval_rules()
         },
         .conflicting_arguments = {},
         .value_arguments = {
-            "--cwd", "-s", "--session-id", "--ref", "-m", "--model", "--effort", "--allow",
-            "--deny", "--sandbox", "--rules", "--system-prompt-override", "--tools",
+            "--cwd", "-s", "--session-id", "--ref", "--worktree-ref", "-m", "--model",
+            "--effort", "--reasoning-effort", "--allow", "--allowedTools", "--deny", "--disallowedTools",
+            "--sandbox", "--rules", "--append-system-prompt", "--system-prompt-override", "--system-prompt", "--tools",
             "--disallowed-tools", "--max-turns", "-p", "--single", "--output-format",
         },
         .optional_value_arguments = {"-r", "--resume", "-w", "--worktree"},
         .flag_arguments = {
             "-c", "--continue", "--fork-session", "--no-plan", "--no-subagents", "--no-memory",
             "--disable-web-search", "--experimental-memory", "--oauth", "--no-alt-screen",
-            "--no-auto-update",
+            "--no-auto-update", "--no-leader",
         },
         .session_commands = {},
         .unsupported_commands = {
