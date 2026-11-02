@@ -96,6 +96,49 @@ void launcher_approval_contract()
         "Grok account management remains unchanged");
 }
 
+void native_launcher_options_contract()
+{
+    // PagerArgs in xai-org/grok-build at 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8
+    // declares these options and aliases. Approval edits must retain their text.
+    const auto& rules = grok::launcher_approval_rules();
+    for (const std::string options : {
+        "--no-leader",
+        "--reasoning-effort high",
+        "--reasoning-effort=high",
+        "--worktree feature --worktree-ref main",
+        "--append-system-prompt \"keep --always-approve as text\"",
+        "--system-prompt=\"keep --always-approve as text\"",
+        "--allowedTools \"Read,Edit\"",
+        "--disallowedTools=\"Bash(rm *)\""})
+    {
+        const std::string source = "grok " + options;
+        const auto enabled = addon::transform_launcher_approval(
+            {{source, "direct", "PROFILE=work"}, "linux-x86_64", addon::Launcher_approval_action::YOLOFY}, rules);
+        require(enabled.disposition == addon::Launcher_approval_disposition::CHANGED &&
+            enabled.script_body == "grok --always-approve " + options,
+            "Yolofy must recognize native options and preserve their values");
+        const auto repeated = addon::transform_launcher_approval(
+            {{enabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64", addon::Launcher_approval_action::YOLOFY}, rules);
+        require(repeated.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+            repeated.script_body == enabled.script_body, "Native option approval editing must be idempotent");
+        const auto disabled = addon::transform_launcher_approval(
+            {{enabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64", addon::Launcher_approval_action::UNYOLOFY}, rules);
+        require(disabled.disposition == addon::Launcher_approval_disposition::CHANGED && disabled.script_body == source,
+            "Unyolofy must retain native options and approval-looking text inside their values");
+        const auto plain_key = addon::launcher_approval_comparison_key(
+            {{source, "direct", "PROFILE=work"}, "linux-x86_64"}, rules);
+        const auto approval_key = addon::launcher_approval_comparison_key(
+            {{enabled.script_body, "direct", "PROFILE=work"}, "linux-x86_64"}, rules);
+        require(plain_key.supported && approval_key.supported && plain_key.key == approval_key.key,
+            "Native option spelling must retain approval-independent launcher identity");
+    }
+    const auto unknown = addon::transform_launcher_approval(
+        {{"grok --unknown-future-option value", "direct", ""}, "linux-x86_64",
+            addon::Launcher_approval_action::YOLOFY}, rules);
+    require(unknown.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,
+        "Unrecognized native options must still refuse approval editing");
+}
+
 addon::Classify_event_request event(std::string name)
 {
     addon::Classify_event_request request;
@@ -128,6 +171,64 @@ public:
     }
     bool finished() const override { return done; }
 };
+
+void standalone_launch_contract(const addon::Prepare_request& base)
+{
+    // Native PagerArgs::no_leader is a clap SetTrue flag with no self override.
+    // Add one selector when absent; preserve authored duplicates for native rejection.
+    const std::vector<std::pair<std::vector<std::string>, std::size_t>> cases{
+        {{}, 1},
+        {{"--no-leader"}, 1},
+        {{"--no-leader", "--no-leader"}, 2},
+        {{"--rules=--no-leader"}, 1},
+        {{"--model", "grok-4.6", "--no-leader", "--effort", "high"}, 1},
+    };
+    for (const auto& [arguments, expected_count] : cases) {
+        auto request = base;
+        const auto program = base.launcher_argv.front();
+        request.launcher.script_body = "\"" + std::filesystem::path(program).generic_string() + "\"";
+        request.launcher_argv = {program};
+        for (const auto& argument : arguments) {
+            request.launcher.script_body += " \"" + argument + "\"";
+            request.launcher_argv.push_back(argument);
+        }
+        Context prepared;
+        prepared.input = {"standalone", {"launch-preparation", 3}, "prepare",
+            addon::encode_prepare_request(request, 3)};
+        grok::handle_preparation(prepared);
+        const auto patch = addon::decode_launch_patch(prepared.output, nullptr, 3);
+        require(prepared.succeeded && patch && patch->argv && patch->apply_managed_configuration,
+            "Standalone fixture must produce a managed native launch");
+        require(static_cast<std::size_t>(std::count(patch->argv->begin(), patch->argv->end(), "--no-leader")) == expected_count,
+            "Ordinary preparation must add --no-leader only when absent as an option");
+        require(patch->argv->size() >= arguments.size() + 1 &&
+            std::equal(arguments.rbegin(), arguments.rend(), patch->argv->rbegin()),
+            "Ordinary preparation must preserve the authored native arguments");
+
+        addon::Resume_prepare_request resume;
+        resume.context.launcher = request.launcher;
+        resume.context.launcher_argv = request.launcher_argv;
+        resume.context.working_directory = request.working_directory;
+        resume.context.launch_environment = request.launch_environment;
+        resume.context.account_context = request.account_context;
+        const std::string session_id = "8e18215e-f612-4131-95dd-7890139a41ae";
+        resume.resume_record.set("provider_session_id", addon::Json_value(session_id));
+        Context resumed;
+        resumed.input = {"standalone-resume", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(resume, 2)};
+        grok::handle_preparation(resumed);
+        const auto result = addon::decode_resume_prepare_result(resumed.output, nullptr, 2);
+        require(resumed.succeeded && result, "Standalone fixture must produce an exact native resume");
+        const auto& resumed_argv = result->process.argv;
+        require(static_cast<std::size_t>(std::count(resumed_argv.begin(), resumed_argv.end(), "--no-leader")) == expected_count,
+            "Resume preparation must add --no-leader only when absent as an option");
+        require(resumed_argv.size() >= arguments.size() + 3 &&
+            std::equal(arguments.begin(), arguments.end(), resumed_argv.begin() + 1) &&
+            resumed_argv[resumed_argv.size() - 2] == "--resume" && resumed_argv.back() == session_id,
+            "Resume preparation must preserve authored arguments and the exact session identity");
+    }
+}
+
 // The public structured and delegated entry points share agent preparation.
 // Equivalent native spellings must keep values, order and approval unchanged.
 void agent_option_forms_contract(const Context& base, const std::string& script_body)
@@ -247,6 +348,7 @@ int main(int argc, char** argv)
     }
     try {
         launcher_approval_contract();
+        native_launcher_options_contract();
         managed_configuration_contract();
         require(grok::wake_compatible_arguments({"--model", "grok-4.6", "--effort=high"}),
             "native model options rejected by wake launch");
@@ -339,6 +441,7 @@ int main(int argc, char** argv)
             std::find(patch->argv->begin(), patch->argv->end(), "grok-4.6") != patch->argv->end(), "prepared native model/options lost");
         require(std::find(patch->set.begin(), patch->set.end(), std::pair<std::string, std::string>{"GROK_HOME", "profiles/./native"}) != patch->set.end(),
             "native profile spelling changed during preparation");
+        standalone_launch_contract(preparation);
         for (const std::string raw : {"~/selected", "'~/selected'", "\"~/selected\""}) {
             const std::string frozen = raw.front() == '~' ? (root / "expanded" / "selected").string() : "~/selected";
             preparation.launcher.runner_key = addon::k_runner_bash;
