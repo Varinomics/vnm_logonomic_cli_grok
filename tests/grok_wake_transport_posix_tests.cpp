@@ -282,15 +282,15 @@ public:
                 ::_exit(126);
             }
             sigset_t signals;
-            ::sigemptyset(&signals);
+            sigemptyset(&signals);
             for (const int signal : {SIGHUP, SIGINT, SIGTERM}) {
                 struct sigaction action{};
                 action.sa_handler = ignore_interrupt && signal == SIGINT ? SIG_IGN : SIG_DFL;
-                ::sigemptyset(&action.sa_mask);
+                sigemptyset(&action.sa_mask);
                 if (::sigaction(signal, &action, nullptr) != 0) {
                     ::_exit(126);
                 }
-                ::sigaddset(&signals, signal);
+                sigaddset(&signals, signal);
             }
             if (::sigprocmask(SIG_UNBLOCK, &signals, nullptr) != 0) {
                 ::_exit(126);

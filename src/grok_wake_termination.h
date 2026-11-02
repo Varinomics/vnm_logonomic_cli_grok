@@ -23,9 +23,9 @@ public:
         s_active = this;
         struct sigaction action{};
         action.sa_handler = remember_signal;
-        ::sigemptyset(&action.sa_mask);
+        sigemptyset(&action.sa_mask);
         for (const int signal : s_signals) {
-            ::sigaddset(&action.sa_mask, signal);
+            sigaddset(&action.sa_mask, signal);
         }
         for (std::size_t i = 0; i < s_signals.size(); ++i) {
             if (::sigaction(s_signals[i], nullptr, &m_previous[i]) != 0 ||
