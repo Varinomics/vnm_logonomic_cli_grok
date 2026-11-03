@@ -51,7 +51,7 @@ int main(int argc, char** argv)
             return result->payload;
         };
         addon::Prepare_request prepare;
-        prepare.launcher = {"'" + addon::path_to_utf8(native) + "' --model grok-4.6", addon::k_runner_direct, {}};
+        prepare.launcher = {"\"" + addon::path_to_utf8(native) + "\" --model grok-4.6", addon::k_runner_direct, {}};
         prepare.launcher_argv = {addon::path_to_utf8(native), "--model", "grok-4.6"};
         prepare.working_directory = addon::path_to_utf8(directory);
         prepare.launch_environment = addon::Launch_environment{addon::host_platform_id(), addon::Json_value::object(), std::nullopt};
@@ -144,6 +144,7 @@ int main(int argc, char** argv)
             "a different executable passed the launch binding");
 
         prepare.launcher.script_body += " --deny write";
+        prepare.launcher_argv.insert(prepare.launcher_argv.end(), {"--deny", "write"});
         const auto restricted = addon::decode_launch_patch(invoke({"launch-preparation", 3}, "prepare",
             addon::encode_prepare_request(prepare, 3)), &failure, 3);
         check(restricted && restricted->session_wake && !restricted->session_wake->available && restricted->argv &&
