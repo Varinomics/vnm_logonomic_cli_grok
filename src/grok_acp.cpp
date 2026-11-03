@@ -169,7 +169,10 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                 const auto& update = json_util::member(params, "update");
                 if (json_util::text(update, "sessionUpdate") == "agent_message_chunk") {
                     if (stage != 4 || json_util::text(json_util::member(update, "content"), "type") != "text") return failure("unexpected_acp_text");
-                    output += json_util::text(json_util::member(update, "content"), "text");
+                    const auto& text = json_util::member(json_util::member(update, "content"), "text");
+                    if (text.is_string()) {
+                        output += text.as_string();
+                    }
                     if (output.size() > k_result_limit) return failure("acp_result_limit");
                 }
             }
