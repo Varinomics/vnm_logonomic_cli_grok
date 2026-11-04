@@ -94,10 +94,12 @@ std::optional<std::vector<std::string>> resolve_probe_launcher(
 std::optional<addon::Launcher_candidate> discover_launcher(const addon::Discover_request& request)
 {
     Launcher_command command{"grok", {}, {}};
-    if (!resolve_probe_launcher(command, {}, request.ambient_environment, {})) return std::nullopt;
+    const auto resolved = resolve_probe_launcher(command, {}, request.ambient_environment, {});
+    if (!resolved) return std::nullopt;
     return addon::Launcher_candidate{
         "interactive", "Grok Build", "grok",
-        request.platform_id == "windows-x86_64" ? addon::k_runner_powershell : addon::k_runner_direct,
+        addon::preferred_discovery_runner(addon::path_from_utf8(resolved->front()),
+            request.platform_id == "windows-x86_64" ? addon::k_runner_powershell : addon::k_runner_direct),
         "", true, addon::Json_value::object(),
     };
 }
