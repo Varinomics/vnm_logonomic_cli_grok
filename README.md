@@ -39,6 +39,11 @@ provide this delivery opportunity. Child hooks cannot consume the root title.
 Exact resume uses the saved native session UUID and native `--resume`; conflicting
 launcher identity or workspace options are refused. The host applies the managed
 hook transform before the resumed launch and admits its actual SessionStart.
+Native `load` observations identify resumed conversations, and negotiated history
+inspection distinguishes known initialization from retained conversation content.
+See [session continuity](docs/session_continuity.md) for the native observation,
+execution-directory and history-inspection contracts, including the boundary for
+selecting a conversation that is already open in Grok.
 
 Optional `session-wake@1` prepares an isolated native leader together with the
 original interactive TUI and a persistent ACP control client. A mailbox wake

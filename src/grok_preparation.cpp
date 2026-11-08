@@ -2,6 +2,7 @@
 #include "grok_accounts.h"
 #include "grok_acp.h"
 #include "grok_launcher.h"
+#include "grok_resume.h"
 #include "grok_wake.h"
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/launcher_utilities.h>
@@ -299,6 +300,100 @@ void refuse_initial_prompt(addon::Invocation_context& context, std::string detai
 {
     context.fail(addon::Result_status::UNAVAILABLE, addon::reason::k_initial_prompt_unavailable, std::move(detail));
 }
+
+struct Resume_scope
+{
+    Launcher_command command;
+    interactive_arguments_t interactive;
+    std::string session_id;
+    std::string home;
+    Environment assignments;
+};
+
+std::optional<Resume_scope> resolve_resume_scope(
+    const addon::Session_launch_context& request,
+    const addon::Json_value& record,
+    addon::Invocation_context& context)
+{
+    const auto* id = record.find("provider_session_id");
+    static const std::regex uuid("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+    if (!record.is_object() || record.as_object().size() != 1 ||
+        !id || !id->is_string() || !std::regex_match(id->as_string(), uuid))
+    {
+        context.fail(addon::Result_status::FAILED, "invalid_resume_record");
+        return std::nullopt;
+    }
+    const auto command = recognize_launcher(
+        request.launcher, request.launch_environment->platform_id, request.launcher_argv);
+    const auto interactive = command ? interactive_arguments(command->prefix_arguments) : std::nullopt;
+    if (!interactive) {
+        context.fail(addon::Result_status::UNAVAILABLE, "resume_launcher_unavailable");
+        return std::nullopt;
+    }
+    for (const auto& argument : command->prefix_arguments) {
+        const auto option = argument.substr(0, argument.find('='));
+        if (option == "--cwd" || option == "--resume" || option == "-r" || option == "--load" ||
+            option == "--continue" || option == "-c" || option == "--session-id" || option == "-s" ||
+            option == "--fork-session")
+        {
+            context.fail(addon::Result_status::UNAVAILABLE, "resume_identity_option_conflict");
+            return std::nullopt;
+        }
+    }
+    const auto home = launch_profile_home(request, context);
+    if (!home) {
+        return std::nullopt;
+    }
+    const auto assignments = launcher_environment(*command, request.launch_environment->effective_environment);
+    if (!assignments) {
+        context.fail(addon::Result_status::UNAVAILABLE, "launcher_environment_unavailable");
+        return std::nullopt;
+    }
+    return Resume_scope{*command, *interactive, id->as_string(), *home, *assignments};
+}
+
+bool local_history_arguments(const std::vector<std::string>& arguments)
+{
+    // Only options whose native meaning leaves local history selection intact
+    // establish this inspection scope. Other launchers retain explicit resume;
+    // an unrecognized scope supplies unknown history evidence.
+    const std::vector<std::string_view> values{
+        "--model", "-m", "--rules", "--append-system-prompt", "--system-prompt", "--agent", "--agents",
+        "--allow", "--deny", "--allowedTools", "--disallowedTools", "--permission-mode",
+        "--reasoning-effort", "--effort", "--debug-file"};
+    const std::vector<std::string_view> flags{
+        "--no-leader", "--always-approve", "--yolo", "--dangerously-skip-permissions"};
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const auto& argument = arguments[index];
+        const auto separator = argument.find('=');
+        const auto option    = argument.substr(0, separator);
+        if (std::find(values.begin(), values.end(), option) != values.end()) {
+            if (separator == std::string::npos) {
+                ++index;
+            }
+        }
+        else
+        if (separator != std::string::npos || std::find(flags.begin(), flags.end(), option) == flags.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+addon::Resume_inspect_result inspect_resume_scope(
+    const Resume_scope& scope,
+    const addon::Session_launch_context& request,
+    bool inspect_content,
+    addon::Invocation_context& context)
+{
+    auto profile = addon::path_from_utf8(scope.home);
+    if (!profile.is_absolute()) {
+        profile = addon::path_from_utf8(request.working_directory) / profile;
+    }
+    return profile.is_absolute() && local_history_arguments(scope.command.prefix_arguments)
+        ? inspect_resume_history(profile, scope.session_id, inspect_content, context)
+        : addon::Resume_inspect_result{};
+}
 }
 void prepare_delegated(addon::Invocation_context& context)
 {
@@ -418,37 +513,25 @@ void prepare_resume(addon::Invocation_context& context)
     addon::Contract_failure failure;
     const auto request = addon::decode_resume_prepare_request(context.request().payload, &failure, 2);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
-    const auto* id = request->resume_record.find("provider_session_id");
-    static const std::regex uuid("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
-    if (!request->resume_record.is_object() || request->resume_record.as_object().size() != 1 ||
-        !id || !id->is_string() || !std::regex_match(id->as_string(), uuid)) {
-        context.fail(addon::Result_status::FAILED, "invalid_resume_record"); return;
+    const auto scope = resolve_resume_scope(request->context, request->resume_record, context);
+    if (!scope) {
+        return;
     }
-    const auto command = recognize_launcher(request->context.launcher,
-        request->context.launch_environment->platform_id, request->context.launcher_argv);
-    const auto interactive = command
-        ? interactive_arguments(command->prefix_arguments)
-        : std::nullopt;
-    if (!interactive) {
-        context.fail(addon::Result_status::UNAVAILABLE, "resume_launcher_unavailable"); return;
+    // @3 requires a fresh native availability read before preparation effects.
+    // Both available and unknown permit exact --resume: local misses, invalid
+    // or unsupported evidence cannot rule out Grok's broader native lookup.
+    inspect_resume_scope(*scope, request->context, false, context);
+    if (context.cancel_requested()) {
+        context.fail(addon::Result_status::CANCELLED, "cancelled");
+        return;
     }
-    for (const auto& argument : command->prefix_arguments) {
-        const auto option = argument.substr(0, argument.find('='));
-        if (option == "--cwd" || option == "--resume" || option == "-r" || option == "--load" ||
-            option == "--continue" || option == "-c" || option == "--session-id" || option == "-s" || option == "--fork-session") {
-            context.fail(addon::Result_status::UNAVAILABLE, "resume_identity_option_conflict"); return;
-        }
-    }
-    const auto home = launch_profile_home(request->context, context);
-    if (!home) return;
-    const auto assignments = launcher_environment(*command, request->context.launch_environment->effective_environment);
-    if (!assignments) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_environment_unavailable"); return; }
-    auto arguments = command->prefix_arguments;
-    if (!interactive->no_leader) {
+    const auto& command = scope->command;
+    auto arguments = command.prefix_arguments;
+    if (!scope->interactive.no_leader) {
         arguments.push_back("--no-leader");
     }
-    arguments.insert(arguments.end(), {"--resume", id->as_string()});
-    const auto argv = resolve_probe_launcher(*command, arguments,
+    arguments.insert(arguments.end(), {"--resume", scope->session_id});
+    const auto argv = resolve_probe_launcher(command, arguments,
         request->context.launch_environment->effective_environment, request->context.working_directory);
     if (!argv) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable"); return; }
     addon::Resume_prepare_result result;
@@ -459,16 +542,16 @@ void prepare_resume(addon::Invocation_context& context)
 #endif
     result.process.argv = *argv;
     result.process.stdin_behavior = addon::Stdin_behavior::INHERIT;
-    result.patch.set = *assignments;
+    result.patch.set = scope->assignments;
     std::erase_if(result.patch.set, [](const auto& item) { return environment_name_equal(item.first, "GROK_HOME"); });
-    result.patch.set.emplace_back("GROK_HOME", *home);
+    result.patch.set.emplace_back("GROK_HOME", scope->home);
     result.patch.profile_storage = request->context.profile_storage;
     result.patch.account_context = request->context.account_context;
     if (request->context.session_wake) {
         auto launch = result.patch;
         launch.argv = *argv;
-        auto wake_arguments = command->prefix_arguments;
-        wake_arguments.insert(wake_arguments.end(), {"--resume", id->as_string()});
+        auto wake_arguments = command.prefix_arguments;
+        wake_arguments.insert(wake_arguments.end(), {"--resume", scope->session_id});
         Environment environment;
         for (const auto& member : request->context.launch_environment->effective_environment.as_object())
             environment.emplace_back(member.name, member.value.as_string());
@@ -489,10 +572,40 @@ void prepare_resume(addon::Invocation_context& context)
     result.acknowledgment.record_digest_hex = addon::resume_record_digest_hex(request->resume_record);
     context.succeed(addon::encode_resume_prepare_result(result, 2));
 }
+
+void inspect_resume(addon::Invocation_context& context)
+{
+    addon::Contract_failure failure;
+    const auto request = addon::decode_resume_inspect_request(context.request().payload, &failure);
+    if (!request) {
+        context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
+        return;
+    }
+    const auto scope = resolve_resume_scope(request->context, request->resume_record, context);
+    if (!scope) {
+        return;
+    }
+    const auto version = context.request().capability.version;
+    auto result = inspect_resume_scope(*scope, request->context, version == 4, context);
+    if (context.cancel_requested()) {
+        context.fail(addon::Result_status::CANCELLED, "cancelled");
+        return;
+    }
+    result.request_digest_hex = addon::resume_inspect_request_digest_hex(*request);
+    context.succeed(addon::encode_resume_inspect_result(result, version));
+}
+
 void handle_preparation(addon::Invocation_context& context)
 {
     if (context.request().capability.capability_id == "interactive-resume" &&
         context.request().operation == addon::k_prepare_resume_operation) { prepare_resume(context); return; }
+    if (context.request().capability.capability_id == "interactive-resume" &&
+        (context.request().capability.version == 3 || context.request().capability.version == 4) &&
+        context.request().operation == addon::k_inspect_resume_operation)
+    {
+        inspect_resume(context);
+        return;
+    }
 
     if ((context.request().capability.capability_id == "delegated-session" ||
          context.request().capability.capability_id == "structured-session") &&
