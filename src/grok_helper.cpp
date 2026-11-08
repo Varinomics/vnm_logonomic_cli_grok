@@ -1,6 +1,7 @@
 #include <logonomic_cli_addon/helper_client.h>
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/json.h>
+#include <logonomic_cli_addon/limits.h>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -61,6 +62,13 @@ int main()
         pointer && pointer->is_string() && pointer->as_string().size() <= 8192)
     {
         body.set("transcriptPath", *pointer);
+    }
+    if (const auto* cwd = event->find("cwd");
+        cwd && cwd->is_string() && cwd->as_string().size() <= addon::limits::k_max_working_directory_bytes)
+    {
+        // Preserve the native default directory's spelling independently of
+        // lifecycle metadata; its optional classifier owns path validation.
+        body.set("cwd", *cwd);
     }
     // Prompt gates cannot supply model context in this native CLI. PreToolUse
     // can, and remains its real event name throughout authenticated admission.

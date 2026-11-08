@@ -108,6 +108,7 @@ std::optional<addon::Classify_event_result> classify_hook(const addon::Classify_
     if (request.context_failure) {
         result.context_failure = addon::Context_failure{*session, *request.context_failure};
     }
+    result.execution_failure = request.execution_failure;
     add_hook_context(request, *session, result);
     if (*name == "Stop" || *name == "PostToolUse" || *name == "PostCompact") {
         return result;
@@ -120,11 +121,28 @@ std::optional<addon::Classify_event_result> classify_hook(const addon::Classify_
         observation.session_transition = addon::Session_transition::STARTED;
         observation.session_source = metadata(body, "source").value_or("");
         result.classification = addon::Classification::TRANSITION;
-        result.transition = observation.session_source == "resume"
+        result.transition = observation.session_source == "load"
             ? addon::Transition_kind::RESUME : addon::Transition_kind::START;
         auto record = addon::Json_value::object();
         record.set("provider_session_id", addon::Json_value(*session));
         observation.resume_record = std::move(record);
+        const auto* cwd = body.find("cwd");
+        if (request.execution_context_version == 1 && !request.execution_failure &&
+            !body.find("subagentType") && !body.find("subagentId") && cwd && cwd->is_string())
+        {
+            // The native envelope uses this actor's session_info.cwd. Capture
+            // it with this SessionStart nonce, never the ledger's prior nonce.
+            addon::Execution_context_update update;
+            update.provider_session_id = *session;
+            update.transition_nonce    = request.transition_nonce;
+            update.status              = addon::Execution_context_status::CONFIRMED;
+            update.environment         = "local";
+            update.cwd                 = cwd->as_string();
+            update.source              = "SessionStart.cwd";
+            if (addon::is_valid_execution_context_update(update)) {
+                result.execution_updates.push_back(std::move(update));
+            }
+        }
     }
     else if (*name == "SessionEnd") observation.session_transition = addon::Session_transition::ENDED;
     else {

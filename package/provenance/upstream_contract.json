@@ -70,5 +70,39 @@
     "https://docs.x.ai/build/overview",
     "https://docs.x.ai/build/cli/reference",
     "https://docs.x.ai/build/features/hooks"
-  ]
+  ],
+  "session_continuity": {
+    "source_snapshot": "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8",
+    "contracts": [
+      "crates/codegen/xai-grok-pager/src/slash/commands/new.rs",
+      "crates/codegen/xai-grok-pager/src/slash/commands/resume.rs",
+      "crates/codegen/xai-grok-pager/src/app/dispatch/session/load.rs",
+      "crates/codegen/xai-grok-pager/src/app/dispatch/ctx.rs",
+      "crates/codegen/xai-grok-pager/src/app/session_startup.rs",
+      "crates/codegen/xai-grok-shell/src/agent/mvp_agent/agent_ops.rs",
+      "crates/codegen/xai-grok-shell/src/agent/mvp_agent/session_setup.rs",
+      "crates/codegen/xai-grok-hooks/src/event.rs",
+      "crates/codegen/xai-grok-shell/src/session/acp_session/hooks.rs",
+      "crates/codegen/xai-grok-shell/src/session/acp_session_impl/run_loop.rs",
+      "crates/codegen/xai-grok-shell/src/session/acp_session_impl/session_setup.rs",
+      "crates/codegen/xai-grok-shell/src/session/acp_session_impl/updates.rs",
+      "crates/codegen/xai-grok-shell/src/session/acp_session.rs",
+      "crates/codegen/xai-grok-shell/src/extensions/notification.rs",
+      "crates/codegen/xai-grok-shell/src/session/persistence.rs",
+      "crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs",
+      "crates/codegen/xai-grok-shell/src/session/storage/mod.rs",
+      "crates/codegen/xai-grok-shell/src/session/storage/relocation/mod.rs",
+      "crates/codegen/xai-grok-config/src/paths.rs",
+      "crates/codegen/xai-grok-shared/src/session/info.rs",
+      "crates/codegen/xai-grok-sampling-types/src/conversation.rs"
+    ],
+    "wire": "Actor installation emits SessionStart with source new when restored chat history is empty, otherwise load. The native cwd field is session_info.cwd. /new aliases /clear. /resume opens the native picker. PostCompact does not replace native identity. A joint root cwd snapshot uses the accepted SessionStart nonce and sequence zero.",
+    "history": "Read-only exact UUID lookup under the supplied selected GROK_HOME. Canonical URL-encoded cwd buckets, a typed matching Summary and readable native history files establish positive availability. Explicit preparation evaluates the same native predicate afresh; available and unknown both permit exact --resume. Format 1 primary system plus optional baseline system_reminder is initialization. Successful session_start hook_execution and an empty untruncated background_tasks snapshot are startup metadata. Missing/zero chat may be rebuilt from updates and is not empty proof. BtwEntry is retained conversation content; unsupported side artifacts prevent empty evidence. Partial, unsupported, conflicting or inaccessible evidence remains unknown. Local absence cannot rule out native alternate resolution and does not refuse explicit resume.",
+    "native_observation": {
+      "version": "1.0.77",
+      "build": "50ca579fa996",
+      "scope": "Official native binary with isolated profile, loopback scripted model backend and capture hook. ACP new/new/cold load emits new/new/load. Manual TUI /clear creates a new UUID before any prompt; selecting the already-open prior UUID through /resume emits no new start hook. After restarting the native process, manual picker selection of that stopped conversation emits load with its original UUID. These observations do not assert full Logonomic desktop integration."
+    },
+    "boundaries": "Already-open picker selection returns no effects and changes only AppView; resident attach skips actor registration. Neither provides authoritative activation evidence. Source new can also describe a resumed empty history. Observe hooks cannot veto native switching or enforce exclusive conversation ownership. Long-cwd slug/hash paths remain unknown to inspection until their native computed path can be verified. Cross-worktree ownership belongs to the shared host."
+  }
 }

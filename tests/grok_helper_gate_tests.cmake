@@ -70,3 +70,19 @@ foreach(event IN ITEMS "post_compact;PostCompact" "post_tool_use;PostToolUse" "u
         message(FATAL_ERROR "Native ${alias_name} context evidence did not reach its classifier: ${status}: ${errors}")
     endif()
 endforeach()
+
+file(WRITE "${input}"
+    "{\"hookEventName\":\"session_start\",\"hook_event_name\":\"SessionStart\",\"sessionId\":\"native-session\",\"source\":\"load\",\"cwd\":\"${WORK_DIRECTORY}/native-session/nested folder\",\"workspaceRoot\":\"${WORK_DIRECTORY}\",\"transcriptPath\":\"${transcript}\"}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "LOGONOMIC_VNMCTL_PATH=${VNMCTL}"
+        "LOGONOMIC_SESSION_CAPABILITY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "LOGONOMIC_PROVIDER_PACKAGE_ID=logonomic.cli.grok"
+        "LOGONOMIC_PROVIDER_GENERATION_DIGEST=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        "LOGONOMIC_PROVIDER_GENERATION_NONCE=cccccccccccccccccccccccccccccccc"
+        "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
+        "${HELPER}"
+    INPUT_FILE "${input}" OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
+if(NOT status STREQUAL "0" OR NOT output STREQUAL "")
+    message(FATAL_ERROR "Native SessionStart lost its exact default directory: ${status}: ${errors}")
+endif()

@@ -26,6 +26,55 @@ bool check(bool condition, const char* message)
     return condition;
 }
 
+bool packaged_execution_context(const addon::Json_value& delivery)
+{
+    const auto& event = json::member(delivery, "event");
+    addon::Classify_event_request request;
+    request.execution_context_version = 1;
+    request.transition_nonce = json::text(delivery, "transition_nonce");
+    request.event.name = json::text(event, "name");
+    request.event.body = json::member(event, "body");
+    const auto transcript = addon::path_from_utf8(json::text(request.event.body, "transcriptPath"));
+    const auto cwd = addon::path_to_utf8(transcript.parent_path() / "nested folder");
+    const auto* helpers = std::getenv("LOGONOMIC_PROVIDER_HELPERS_DIR");
+    if (!check(helpers && request.event.name == "SessionStart" &&
+            json::text(request.event.body, "cwd") == cwd && json::text(request.event.body, "source") == "load",
+            "native helper did not preserve the exact SessionStart cwd and load source"))
+    {
+        return false;
+    }
+    addon::Simulator_options options;
+    options.package_directory = addon::path_from_utf8(helpers).parent_path();
+    addon::Host_simulator host(options, nullptr);
+    addon::Contract_failure failure;
+    if (!check(host.start(&failure), failure.detail.c_str())) {
+        return false;
+    }
+    const auto capabilities = host.live_capabilities();
+    if (!check(std::any_of(capabilities.begin(), capabilities.end(), [](const auto& capability) {
+            return capability.capability_id == "execution-context" && capability.version == 1;
+        }), "packaged adapter did not negotiate execution-context@1"))
+    {
+        return false;
+    }
+    const auto id = host.invoke({"helper-ingress", 2}, "classify_event",
+        addon::encode_classify_event_request(request), 4000);
+    const auto outcome = host.wait_outcome(id, 4500);
+    const auto result = outcome && outcome->status == addon::Host_status::SUCCESS
+        ? addon::decode_classify_event_result(outcome->payload, nullptr) : std::nullopt;
+    if (!check(result && result->transition == addon::Transition_kind::RESUME &&
+            result->observations.size() == 1 && result->execution_updates.size() == 1 &&
+            result->execution_updates.front().cwd == cwd &&
+            result->execution_updates.front().transition_nonce == request.transition_nonce,
+            "native helper-to-packaged-classifier execution evidence did not survive"))
+    {
+        return false;
+    }
+    int exit_code = -1;
+    return check(host.shutdown(1000, &exit_code) && exit_code == 0,
+        "packaged execution adapter did not shut down cleanly");
+}
+
 bool packaged_context(const addon::Json_value& delivery)
 {
     const auto& event = json::member(delivery, "event");
@@ -168,7 +217,8 @@ int main(int argc, char** argv)
     }
     const auto value = addon::parse_json(input, {}, nullptr);
     if (provider_event) {
-        if (!value || !packaged_context(*value)) {
+        const bool execution = value && json::text(json::member(*value, "event"), "name") == "SessionStart";
+        if (!value || !(execution ? packaged_execution_context(*value) : packaged_context(*value))) {
             return 2;
         }
         std::fputs("{\"accepted\":true}\n", stdout);

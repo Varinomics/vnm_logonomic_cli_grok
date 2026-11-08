@@ -43,6 +43,79 @@ addon::Classify_event_request hook(const std::string& name)
     return request;
 }
 
+bool execution_context_contract()
+{
+    bool ok = true;
+#ifdef _WIN32
+    const std::string cwd = "C:\\work\\repo\\nested folder";
+#else
+    const std::string cwd = "/work/repo/nested folder";
+#endif
+    auto request = hook("SessionStart");
+    request.event.body.set("source", addon::Json_value("load"));
+    request.event.body.set("cwd", addon::Json_value(cwd));
+    request.event.body.set("workspaceRoot", addon::Json_value("not-the-default-directory"));
+    request.execution_context_version = 1;
+    request.transition_nonce = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    request.ledger.current_epoch = 3;
+    request.ledger.current_transition = addon::Ledger_transition{
+        addon::Transition_kind::RESUME, "8e18215e-f612-4131-95dd-7890139a41ae",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
+    const auto resumed = grok::classify_hook(request);
+    if (!check(resumed && resumed->execution_updates.size() == 1, "native root cwd observation is missing")) {
+        return false;
+    }
+    const auto& update = resumed->execution_updates.front();
+    ok &= check(update.cwd == cwd && update.sequence == 0 && update.transition_nonce == request.transition_nonce &&
+            update.provider_session_id == "8e18215e-f612-4131-95dd-7890139a41ae" &&
+            update.status == addon::Execution_context_status::CONFIRMED && update.environment == "local",
+        "native cwd lost spelling, default-directory meaning or new activation attribution");
+    const auto roundtrip = addon::decode_classify_event_result(addon::encode_classify_event_result(*resumed), nullptr);
+    ok &= check(roundtrip && roundtrip->execution_updates == resumed->execution_updates &&
+            roundtrip->transition == addon::Transition_kind::RESUME,
+        "optional execution context did not survive beside native resume classification");
+
+    request.event.body.set("source", addon::Json_value("new"));
+    const auto created = grok::classify_hook(request);
+    ok &= check(created && created->transition == addon::Transition_kind::START && created->execution_updates.size() == 1,
+        "native new identity did not preserve independent execution evidence");
+    request.execution_context_version = 0;
+    const auto unrequested = grok::classify_hook(request);
+    ok &= check(unrequested && unrequested->execution_updates.empty() && unrequested->observations.size() == 1,
+        "unnegotiated execution context changed lifecycle support");
+    request.execution_context_version = 1;
+    for (const auto& invalid : {std::string("relative/folder"), std::string("ssh://host/work"),
+             cwd + '\n', cwd + std::string(1, '\0'), cwd + std::string(4096, 'x')})
+    {
+        request.event.body.set("cwd", addon::Json_value(invalid));
+        const auto result = grok::classify_hook(request);
+        ok &= check(result && result->execution_updates.empty() && result->observations.size() == 1 &&
+                result->classification == addon::Classification::TRANSITION,
+            "invalid optional native cwd rejected its valid lifecycle transition");
+    }
+    request.event.body.set("cwd", addon::Json_value(cwd));
+    request.execution_failure = addon::Contract_failure{"unsupported_version", "unsupported execution companion"};
+    const auto invalid = grok::classify_hook(request);
+    ok &= check(invalid && invalid->execution_failure && invalid->execution_updates.empty() &&
+            invalid->observations.size() == 1,
+        "malformed optional execution request discarded native lifecycle evidence");
+    request.execution_failure.reset();
+    request.event.body.set("subagentType", addon::Json_value("researcher"));
+    const auto child = grok::classify_hook(request);
+    ok &= check(child && child->execution_updates.empty() && child->observations.empty(),
+        "child observation acquired root native execution state");
+    for (const std::string name : {"UserPromptSubmit", "PostToolUse", "PostCompact", "SessionEnd"}) {
+        auto later = hook(name);
+        later.execution_context_version = 1;
+        later.transition_nonce = request.transition_nonce;
+        later.event.body.set("cwd", addon::Json_value(cwd));
+        const auto result = grok::classify_hook(later);
+        ok &= check(result && result->execution_updates.empty() && result->classification != addon::Classification::TRANSITION,
+            "later hook without source activation attribution invented cwd or identity");
+    }
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -57,11 +130,12 @@ int main(int argc, char** argv)
     if (!check(declaration.has_value(), "package lifecycle declaration is unreadable")) {
         return 1;
     }
-    bool ok = true;
+    bool ok = execution_context_contract();
     for (const std::string name : {"SessionStart", "UserPromptSubmit", "StopFailure", "StopCancelled", "SessionEnd"}) {
         auto request = hook(name);
         if (name == "SessionStart") {
-            request.event.body.set("source", addon::Json_value("resume"));
+            // Grok's actor registration emits "load" for restored history.
+            request.event.body.set("source", addon::Json_value("load"));
         }
         const auto result = grok::classify_hook(request);
         if (!check(result && result->observations.size() == 1, name + " left no observation")) {
@@ -70,6 +144,10 @@ int main(int argc, char** argv)
         }
         ok &= check(addon::lifecycle_profile_admits(declaration->features, result->observations.front()),
             "the declaration refuses what " + name + " reports");
+        if (name == "SessionStart") {
+            ok &= check(result->transition == addon::Transition_kind::RESUME,
+                "native SessionStart source=load must identify a resume transition");
+        }
     }
     return ok ? 0 : 1;
 }

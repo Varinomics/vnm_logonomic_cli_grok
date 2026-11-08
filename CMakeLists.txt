@@ -59,6 +59,7 @@ add_library(grok_provider STATIC
     src/grok_context.cpp
     src/grok_lifecycle.cpp
     src/grok_preparation.cpp
+    src/grok_resume.cpp
     src/grok_probes.cpp
     src/grok_usage.cpp
     src/grok_usage_records.cpp)
@@ -183,6 +184,12 @@ grok_target(grok_lifecycle_tests)
 add_dependencies(grok_lifecycle_tests grok_package)
 add_test(NAME grok_lifecycle_tests COMMAND grok_lifecycle_tests "${GROK_PACKAGE_DIRECTORY}")
 set_tests_properties(grok_lifecycle_tests PROPERTIES TIMEOUT 120)
+add_executable(grok_resume_tests tests/grok_resume_tests.cpp)
+target_link_libraries(grok_resume_tests PRIVATE grok_provider)
+grok_target(grok_resume_tests)
+add_dependencies(grok_resume_tests grok_package)
+add_test(NAME grok_resume_tests COMMAND grok_resume_tests "${GROK_PACKAGE_DIRECTORY}")
+set_tests_properties(grok_resume_tests PROPERTIES TIMEOUT 120)
 add_test(NAME grok_package_validation COMMAND logonomic_cli_addon_validate "${GROK_PACKAGE_DIRECTORY}" --platform "${GROK_PLATFORM}")
 add_test(NAME grok_package_conformance COMMAND logonomic_cli_addon_conformance "${GROK_PACKAGE_DIRECTORY}")
 add_executable(grok_usage_cache_tests tests/grok_usage_cache_tests.cpp)
