@@ -6,6 +6,7 @@
 #include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#include <logonomic_cli_addon/usage_scan.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -51,7 +52,7 @@ public:
     ~Temporary_directory()
     {
         std::error_code error;
-        fs::remove_all(m_path, error);
+        fs::remove_all(addon::usage_cache_io_path(m_path), error);
     }
     const fs::path& path() const { return m_path; }
 
@@ -61,8 +62,8 @@ private:
 
 void write(const fs::path& path, std::string_view bytes)
 {
-    fs::create_directories(path.parent_path());
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    fs::create_directories(addon::usage_cache_io_path(path.parent_path()));
+    std::ofstream output(addon::usage_cache_io_path(path), std::ios::binary | std::ios::trunc);
     output.write(bytes.data(), (std::streamsize)bytes.size());
     output.close();
     require(bool(output), "could not write native history fixture");
@@ -71,12 +72,13 @@ void write(const fs::path& path, std::string_view bytes)
 std::map<std::string, std::string> native_files(const fs::path& root)
 {
     std::map<std::string, std::string> result;
-    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+    const auto io_root = addon::usage_cache_io_path(root);
+    for (const auto& entry : fs::recursive_directory_iterator(io_root)) {
         if (!entry.is_regular_file()) {
             continue;
         }
         std::ifstream input(entry.path(), std::ios::binary);
-        result.emplace(addon::path_to_utf8(fs::relative(entry.path(), root)),
+        result.emplace(addon::path_to_utf8(fs::relative(entry.path(), io_root)),
             std::string(std::istreambuf_iterator<char>(input), {}));
     }
     return result;
@@ -341,7 +343,7 @@ void native_content_contract(
     require_content(host, request, Content::UNKNOWN, "unrecognized background work manufactured empty history");
     summary = native_summary(request.context.working_directory);
     write(summary_path, addon::serialize_json(summary));
-    fs::remove(updates_path);
+    fs::remove(addon::usage_cache_io_path(updates_path));
 
     const std::vector<std::pair<std::string, std::string>> unknown{
         {"zero-byte cache", ""},
@@ -377,7 +379,7 @@ void native_content_contract(
         std::string(k_session_id) + "\",\"update\":{\"sessionUpdate\":\"user_message_chunk\","
         "\"content\":{\"type\":\"text\",\"text\":\"Retain this user input.\"}}}}\n");
     require_content(host, request, Content::NONEMPTY, "companion updates lost retained user input");
-    fs::remove(chat_path);
+    fs::remove(addon::usage_cache_io_path(chat_path));
     require_content(host, request, Content::NONEMPTY, "native rebuildable replay content was treated as empty");
     write(chat_path, k_primary);
     write(updates_path, "{\"timestamp\":1794123000,\"method\":\"_x.ai/session/update\",\"params\":{\"sessionId\":\"" +
@@ -385,7 +387,7 @@ void native_content_contract(
     require_content(host, request, Content::UNKNOWN, "uncertain compaction replay manufactured empty history");
     write(updates_path, "{\"timestamp\":1794123000");
     require_content(host, request, Content::UNKNOWN, "incomplete replay manufactured empty history");
-    fs::remove(updates_path);
+    fs::remove(addon::usage_cache_io_path(updates_path));
     summary.set("num_messages", addon::Json_value(1));
     write(summary_path, addon::serialize_json(summary));
     require_content(host, request, Content::UNKNOWN, "missing retained replay contradicted by summary count became empty");
@@ -406,12 +408,12 @@ void native_content_contract(
     const auto oversized = inspect(host, request);
     require(oversized.availability == addon::Resume_availability::UNKNOWN && oversized.content == Content::UNKNOWN,
         "bounded read supplied positive evidence for oversized history");
-    fs::remove(chat_path);
-    fs::create_directory(chat_path);
+    fs::remove(addon::usage_cache_io_path(chat_path));
+    fs::create_directory(addon::usage_cache_io_path(chat_path));
     require(inspect(host, request).availability == addon::Resume_availability::UNKNOWN,
         "nonregular native chat history was advertised as resumable");
     prepare_exact(host, request);
-    fs::remove(chat_path);
+    fs::remove(addon::usage_cache_io_path(chat_path));
     write(chat_path, k_primary);
 
     // /btw is an independently persisted conversation stream; it does not
@@ -423,18 +425,18 @@ void native_content_contract(
     require_content(host, request, Content::NONEMPTY, "retained /btw conversation was hidden as empty");
     write(btw_path, "{\"question\":\"incomplete side history\"}\n");
     require_content(host, request, Content::UNKNOWN, "unsupported /btw history manufactured emptiness");
-    fs::remove(btw_path);
+    fs::remove(addon::usage_cache_io_path(btw_path));
     write(directory / "feedback.jsonl", "{\"type\":\"user_feedback\",\"submission\":{\"text\":\"retain this feedback\"}}\n");
     require_content(host, request, Content::UNKNOWN, "uninspected side-history stream manufactured emptiness");
-    fs::remove(directory / "feedback.jsonl");
+    fs::remove(addon::usage_cache_io_path(directory / "feedback.jsonl"));
     write(directory / "events.jsonl", "");
     require_content(host, request, Content::EMPTY, "empty native telemetry file contradicted complete initialization");
     write(directory / "events.jsonl", "{\"type\":\"turn_started\"}\n");
     require_content(host, request, Content::UNKNOWN, "uninspected native event content manufactured emptiness");
-    fs::remove(directory / "events.jsonl");
-    fs::create_directories(directory / "compaction_checkpoints");
+    fs::remove(addon::usage_cache_io_path(directory / "events.jsonl"));
+    fs::create_directories(addon::usage_cache_io_path(directory / "compaction_checkpoints"));
     require_content(host, request, Content::UNKNOWN, "uninspected compaction checkpoint directory manufactured emptiness");
-    fs::remove(directory / "compaction_checkpoints");
+    fs::remove(addon::usage_cache_io_path(directory / "compaction_checkpoints"));
 }
 
 void native_fixture_contract(
@@ -455,11 +457,12 @@ void native_fixture_contract(
     Temporary_directory temporary;
     const auto profile = temporary.path() / "profile";
     const auto directory = profile / "sessions" / cwd_bucket(cwd) / addon::path_from_utf8(id);
-    fs::create_directories(directory);
-    for (const auto& entry : fs::directory_iterator(fixture)) {
+    fs::create_directories(addon::usage_cache_io_path(directory));
+    for (const auto& entry : fs::directory_iterator(addon::usage_cache_io_path(fixture))) {
         // This is the capture helper's annotation, not a native session file.
         if (entry.path().filename() != "provenance.json") {
-            fs::copy(entry.path(), directory / entry.path().filename(), fs::copy_options::recursive);
+            fs::copy(entry.path(), addon::usage_cache_io_path(directory / entry.path().filename()),
+                fs::copy_options::recursive);
         }
     }
 #ifdef _WIN32
@@ -491,6 +494,28 @@ void native_fixture_contract(
     int exit_code = -1;
     require(host.shutdown(1000, &exit_code) && exit_code == 0, "native fixture adapter shutdown failed");
     std::cout << "native fixture " << id << ": available/" << actual << "; captured bytes unchanged\n";
+}
+
+void long_profile_contract(
+    addon::Host_simulator& host, const fs::path& native, const fs::path& root, const fs::path& cwd)
+{
+    const auto profile = root / "long-profile" / std::string(90, 'p');
+    const auto request = inspect_request(native, profile, cwd);
+    const auto directory = profile / "sessions" / cwd_bucket(addon::path_to_utf8(cwd)) /
+        addon::path_from_utf8(k_session_id);
+    auto summary = native_summary(addon::path_to_utf8(cwd));
+    summary.set("num_chat_messages", addon::Json_value(2));
+    write(directory / "summary.json", addon::serialize_json(summary));
+    write(directory / "chat_history.jsonl", std::string(k_primary) +
+        "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Retain this conversation.\"}]}\n");
+    write(directory / "updates.jsonl", "");
+    const auto before = native_files(profile);
+    require_content(host, request, addon::Resume_content::NONEMPTY,
+        "understood native history at a long profile path became unavailable");
+    require(inspect(host, request, 3).availability == addon::Resume_availability::AVAILABLE,
+        "long profile inspection changed the availability-only contract");
+    prepare_exact(host, request);
+    require(before == native_files(profile), "long profile inspection/preparation changed native bytes");
 }
 
 } // namespace
@@ -548,6 +573,7 @@ int main(int argc, char** argv)
             "version 3 did not retain its availability-only contract");
         prepare_exact(host, request);
         require(before == native_files(profile), "inspection or preparation modified native history");
+        long_profile_contract(host, native, root, cwd);
 
         auto invalid = request;
         invalid.resume_record.set("unexpected", addon::Json_value("another conversation"));
@@ -590,26 +616,26 @@ int main(int argc, char** argv)
         prepare_exact(host, alternative);
 
         const auto alias_bucket = profile / "sessions" / "unverified-cwd-marker";
-        fs::rename(directory.parent_path(), alias_bucket);
+        fs::rename(addon::usage_cache_io_path(directory.parent_path()), addon::usage_cache_io_path(alias_bucket));
         write(alias_bucket / ".cwd", request.context.working_directory);
         require(inspect(host, request).availability == addon::Resume_availability::UNKNOWN,
             "a cwd marker advertised a directory native load would not recompute");
         prepare_exact(host, request);
-        fs::remove(alias_bucket / ".cwd");
-        fs::rename(alias_bucket, directory.parent_path());
+        fs::remove(addon::usage_cache_io_path(alias_bucket / ".cwd"));
+        fs::rename(addon::usage_cache_io_path(alias_bucket), addon::usage_cache_io_path(directory.parent_path()));
 
         const auto duplicate = profile / "sessions" / cwd_bucket(addon::path_to_utf8(root)) /
             addon::path_from_utf8(k_session_id);
         write(duplicate / "summary.json", addon::serialize_json(native_summary(addon::path_to_utf8(root))));
         require(inspect(host, request).availability == addon::Resume_availability::UNKNOWN,
             "duplicate native identity was selected by directory order");
-        fs::remove_all(duplicate.parent_path());
+        fs::remove_all(addon::usage_cache_io_path(duplicate.parent_path()));
         auto wrong = native_summary(request.context.working_directory);
         wrong.find("info")->set("id", addon::Json_value("87d4155d-df9c-4ccc-a69b-900d555916e2"));
         write(directory / "summary.json", addon::serialize_json(wrong));
         require(inspect(host, request).availability == addon::Resume_availability::UNKNOWN,
             "mismatched persisted identity claimed availability");
-        fs::remove_all(directory);
+        fs::remove_all(addon::usage_cache_io_path(directory));
         require(inspect(host, request).availability == addon::Resume_availability::UNKNOWN,
             "deleted local evidence incorrectly ruled out native nonlocal resolution");
         prepare_exact(host, request);

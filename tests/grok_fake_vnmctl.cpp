@@ -35,7 +35,9 @@ bool packaged_execution_context(const addon::Json_value& delivery)
     request.event.name = json::text(event, "name");
     request.event.body = json::member(event, "body");
     const auto transcript = addon::path_from_utf8(json::text(request.event.body, "transcriptPath"));
-    const auto cwd = addon::path_to_utf8(transcript.parent_path() / "nested folder");
+    // CMake supplies this fixture's exact cwd with forward separators.
+    const auto cwd_bytes = (transcript.parent_path() / "nested folder").generic_u8string();
+    const std::string cwd(cwd_bytes.begin(), cwd_bytes.end());
     const auto* helpers = std::getenv("LOGONOMIC_PROVIDER_HELPERS_DIR");
     if (!check(helpers && request.event.name == "SessionStart" &&
             json::text(request.event.body, "cwd") == cwd && json::text(request.event.body, "source") == "load",

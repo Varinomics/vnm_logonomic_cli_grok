@@ -3,6 +3,7 @@
 
 #include <logonomic_cli_addon/execution_context.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/usage_scan.h>
 #include <logonomic_cli_addon/usage_temporal.h>
 
 #include <algorithm>
@@ -38,19 +39,20 @@ struct file_stamp_t
 
 std::optional<file_stamp_t> file_stamp(const fs::path& path)
 {
+    const auto io_path = addon::usage_cache_io_path(path);
     std::error_code error;
-    const auto status = fs::symlink_status(path, error);
+    const auto status = fs::symlink_status(io_path, error);
     if (error == std::errc::no_such_file_or_directory || status.type() == fs::file_type::not_found) {
         return file_stamp_t{true};
     }
     if (error || !fs::is_regular_file(status)) {
         return std::nullopt;
     }
-    const auto bytes = fs::file_size(path, error);
+    const auto bytes = fs::file_size(io_path, error);
     if (error) {
         return std::nullopt;
     }
-    const auto modified = fs::last_write_time(path, error);
+    const auto modified = fs::last_write_time(io_path, error);
     if (error) {
         return std::nullopt;
     }
@@ -66,7 +68,7 @@ std::optional<std::string> read_file(
     if (stamp.missing || stamp.bytes > limit || context.cancel_requested()) {
         return std::nullopt;
     }
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(addon::usage_cache_io_path(path), std::ios::binary);
     if (!input) {
         return std::nullopt;
     }
@@ -144,7 +146,9 @@ std::optional<std::string> bucket_cwd(const fs::path& bucket)
         return std::nullopt;
     }
     std::error_code error;
-    if (!fs::equivalent(bucket, bucket.parent_path() / addon::path_from_utf8(encoded), error) || error) {
+    if (!fs::equivalent(addon::usage_cache_io_path(bucket),
+            addon::usage_cache_io_path(bucket.parent_path() / addon::path_from_utf8(encoded)), error) || error)
+    {
         return std::nullopt;
     }
     return decoded;
@@ -156,7 +160,12 @@ std::optional<fs::path> exact_session_directory(
     addon::Invocation_context& context)
 {
     std::error_code error;
-    fs::directory_iterator entry(profile / "sessions", error);
+    auto sessions = profile / "sessions";
+#ifdef _WIN32
+    // Verbatim Windows I/O paths do not resolve a relative home's dot segments.
+    sessions = sessions.lexically_normal();
+#endif
+    fs::directory_iterator entry(addon::usage_cache_io_path(sessions), error);
     if (error) {
         return std::nullopt;
     }
@@ -173,8 +182,8 @@ std::optional<fs::path> exact_session_directory(
         if (!fs::is_directory(status)) {
             continue;
         }
-        const auto candidate = entry->path() / addon::path_from_utf8(session_id);
-        const auto type      = fs::symlink_status(candidate, error);
+        const auto candidate = sessions / entry->path().filename() / addon::path_from_utf8(session_id);
+        const auto type      = fs::symlink_status(addon::usage_cache_io_path(candidate), error);
         if (error == std::errc::no_such_file_or_directory || type.type() == fs::file_type::not_found) {
             error.clear();
             continue;
@@ -512,11 +521,12 @@ addon::Resume_content side_content(
     const fs::path& directory, std::string_view session_id, addon::Invocation_context& context)
 {
     std::error_code error;
-    const auto modified = fs::last_write_time(directory, error);
+    const auto io_directory = addon::usage_cache_io_path(directory);
+    const auto modified = fs::last_write_time(io_directory, error);
     if (error) {
         return addon::Resume_content::UNKNOWN;
     }
-    fs::directory_iterator entry(directory, error);
+    fs::directory_iterator entry(io_directory, error);
     if (error) {
         return addon::Resume_content::UNKNOWN;
     }
@@ -526,11 +536,12 @@ addon::Resume_content side_content(
         if (error || stamps.size() >= k_max_buckets || context.cancel_requested()) {
             return addon::Resume_content::UNKNOWN;
         }
-        const auto stamp = file_stamp(entry->path());
+        const auto path = directory / entry->path().filename();
+        const auto stamp = file_stamp(path);
         if (!stamp || stamp->missing) {
             return addon::Resume_content::UNKNOWN;
         }
-        stamps.emplace_back(entry->path(), *stamp);
+        stamps.emplace_back(path, *stamp);
         const auto name = addon::path_to_utf8(entry->path().filename());
         if (name == "summary.json" || name == "chat_history.jsonl" || name == "updates.jsonl" ||
             name == "system_prompt.txt" || name == "prompt_context.json" || name == "title_refresh_idx" ||
@@ -544,7 +555,7 @@ addon::Resume_content side_content(
         if (name != "btw_history.jsonl") {
             return addon::Resume_content::UNKNOWN;
         }
-        const auto bytes = read_file(entry->path(), *stamp, k_max_history_bytes, context);
+        const auto bytes = read_file(path, *stamp, k_max_history_bytes, context);
         if (!bytes) {
             return addon::Resume_content::UNKNOWN;
         }
@@ -555,7 +566,7 @@ addon::Resume_content side_content(
             return result;
         }
     }
-    if (error || fs::last_write_time(directory, error) != modified || error) {
+    if (error || fs::last_write_time(io_directory, error) != modified || error) {
         return addon::Resume_content::UNKNOWN;
     }
     for (const auto& [path, stamp] : stamps) {
@@ -592,7 +603,8 @@ std::optional<history_file_t> read_history(const fs::path& path, addon::Invocati
 bool readable_workflows(const fs::path& directory)
 {
     std::error_code error;
-    const auto status = fs::symlink_status(directory / "workflows", error);
+    const auto workflows = addon::usage_cache_io_path(directory / "workflows");
+    const auto status = fs::symlink_status(workflows, error);
     if (error == std::errc::no_such_file_or_directory || status.type() == fs::file_type::not_found) {
         return true;
     }
@@ -602,7 +614,7 @@ bool readable_workflows(const fs::path& directory)
     if (fs::is_directory(status)) {
         // Native restore skips invalid entries, but opening its workflow
         // directory can still fail the whole load.
-        const fs::directory_iterator entries(directory / "workflows", error);
+        const fs::directory_iterator entries(workflows, error);
         return !error;
     }
     return true;
