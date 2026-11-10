@@ -392,6 +392,63 @@ void agent_option_forms_contract(const Context& base, const std::string& script_
     }
 }
 
+void delegated_model_selection_contract(const Context& base)
+{
+    const auto saved = addon::decode_delegated_prepare_request(base.input.payload, nullptr);
+    const auto baseline = addon::decode_delegated_prepare_result(base.output, nullptr);
+    require(saved && baseline && !baseline->process.argv.empty(), "delegated selection fixture is prepared");
+    const std::string options =
+        " --model=first-model -m second-model --effort low --reasoning-effort=medium --always-approve";
+    for (const bool model : {false, true}) {
+        for (const bool effort : {false, true}) {
+            auto request = *saved;
+            request.context.launcher.script_body += options;
+            request.context.launcher_argv.back() = request.context.launcher.script_body;
+            addon::Delegated_model_selection selection;
+            if (model) {
+                selection.model = "provider/next model";
+            }
+            if (effort) {
+                selection.reasoning_effort = "adaptive-next";
+            }
+            if (model || effort) {
+                request.model_selection = selection;
+            }
+            Context prepared;
+            prepared.input = base.input;
+            prepared.input.payload = addon::encode_delegated_prepare_request(request);
+            const auto input = prepared.input.payload;
+            grok::handle_preparation(prepared);
+            const auto result = prepared.succeeded
+                ? addon::decode_delegated_prepare_result(prepared.output, nullptr) : std::nullopt;
+            require(result.has_value(), "delegated model selection reaches native agent preparation");
+            auto expected = baseline->process.argv;
+            expected.pop_back();
+            if (!model) {
+                expected.insert(expected.end(), {"--model", "first-model", "-m", "second-model"});
+            }
+            if (!effort) {
+                expected.insert(expected.end(), {"--effort", "low", "--reasoning-effort", "medium"});
+            }
+            expected.push_back("--always-approve");
+            if (model) {
+                expected.push_back("--model=" + *selection.model);
+            }
+            if (effort) {
+                expected.push_back("--reasoning-effort=" + *selection.reasoning_effort);
+            }
+            expected.push_back("stdio");
+            require(result->process.argv == expected && result->model_selection == request.model_selection,
+                "per-task selection replaces every native alias and acknowledges the exact opaque values");
+            require(result->process.environment == baseline->process.environment &&
+                result->account_context && baseline->account_context &&
+                addon::encode_account_context(*result->account_context) ==
+                    addon::encode_account_context(*baseline->account_context) && prepared.input.payload == input,
+                "selection preserves the chosen account, environment, approval and saved launcher");
+        }
+    }
+}
+
 void managed_configuration_contract()
 {
 #ifdef _WIN32
@@ -636,6 +693,7 @@ int main(int argc, char** argv)
                     "session producer duplicated inherited and frozen assignments");
                 agent_option_forms_contract(task, launch.launcher.script_body);
                 if (delegated) {
+                    delegated_model_selection_contract(task);
                     const auto delegated_result = addon::decode_delegated_prepare_result(task.output, &failure);
                     require(delegated_result &&
                         delegated_result->acknowledgment.connection_version == addon::k_delegated_connection_version &&

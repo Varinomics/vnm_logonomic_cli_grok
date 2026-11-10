@@ -458,8 +458,23 @@ void prepare_delegated(addon::Invocation_context& context)
         if (value.empty() || value.starts_with('-')) {
             context.fail(addon::Result_status::FAILED, "invalid_launcher_option"); return;
         }
-        arguments.push_back(option);
-        arguments.emplace_back(value);
+        const bool replaced = request->model_selection &&
+            (((option == "--model" || option == "-m") && request->model_selection->model) ||
+             ((option == "--reasoning-effort" || option == "--effort") &&
+                 request->model_selection->reasoning_effort));
+        if (!replaced) {
+            arguments.push_back(option);
+            arguments.emplace_back(value);
+        }
+    }
+    if (request->model_selection) {
+        const auto& selection = *request->model_selection;
+        if (selection.model) {
+            arguments.push_back("--model=" + *selection.model);
+        }
+        if (selection.reasoning_effort) {
+            arguments.push_back("--reasoning-effort=" + *selection.reasoning_effort);
+        }
     }
     arguments.push_back("stdio");
     const auto argv = resolve_probe_launcher(*command, arguments,
@@ -472,6 +487,7 @@ void prepare_delegated(addon::Invocation_context& context)
     result.process.executable = "helpers/grok_launch_bridge";
 #endif
     result.process.argv = *argv;
+    result.model_selection = request->model_selection;
     result.process.stdin_behavior = addon::Stdin_behavior::PAYLOAD;
     result.process.stdin_payload = acp_initialize();
     result.process.environment = *assignments;

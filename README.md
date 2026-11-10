@@ -110,6 +110,11 @@ session catalog reports ready and exposes every required action, then submits th
 prompt. Native end-turn and an acknowledged session close are required for a
 result. Model selection has no version ceiling.
 
+`delegated-model-selection@1` accepts per-task model and reasoning-effort
+selection through `grok agent --model` and `--reasoning-effort`. Each requested
+setting replaces that option in the delegated invocation; omitted settings
+retain the launcher's defaults. The saved launcher and Grok profile are unchanged.
+
 A structured or delegated task keeps the launcher's permission posture. The
 launcher's `--model`, `--reasoning-effort` and `--always-approve` options carry
 over to `grok agent`; the interactive CLI's other options, among them

@@ -71,6 +71,7 @@ int main()
         {"lifecycle-events", 2}, {"helper-ingress", 2}, {"context-state", 2}, {"coordination-delivery", 1},
         {"model-context-delivery", 1}, {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
         {"execution-context", 1}, {"structured-session", 3}, {"delegated-session", 3},
+        {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
         {"session-wake", 1},
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
     };
