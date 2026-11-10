@@ -1,9 +1,12 @@
 #include "grok_lifecycle.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
+#include <logonomic_cli_addon/host_simulator.h>
+#include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/lifecycle_events.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/provider_event_diagnostic.h>
 #include <logonomic_cli_addon/sidecar.h>
 
 #include <filesystem>
@@ -21,6 +24,72 @@ bool check(bool condition, const std::string& message)
         std::cerr << message << '\n';
     }
     return condition;
+}
+
+bool classification_diagnostics(const std::filesystem::path& package)
+{
+    const auto root = std::filesystem::temp_directory_path() / ("grok-event-diagnostics-" + addon::random_nonce_hex());
+    addon::Simulator_options options;
+    options.package_directory = package;
+    options.profile_storage_root = root;
+    addon::Host_simulator host(options, nullptr);
+    addon::Contract_failure failure;
+    if (!check(host.start(&failure), "Packaged Grok diagnostic adapter did not start")) {
+        return false;
+    }
+    bool ok = true;
+    const auto rejected = [
+            &host,
+            &ok
+        ](
+            const char* event_name,
+            const char* body,
+            const char* field,
+            addon::Provider_event_problem problem)
+        {
+            addon::Attention_classification_request request;
+            request.base.event = {event_name, *addon::parse_json(body, {}, nullptr)};
+            request.base.transition_nonce = std::string(32, 'a');
+            const auto id = host.invoke({addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
+                addon::k_classify_event_operation, addon::encode_attention_classification_request(request), 5000);
+            const auto outcome = host.wait_outcome(id, 6000);
+            if (!check(outcome && outcome->status == addon::Host_status::FAILED &&
+                outcome->reason_code == "invalid_provider_event", "Malformed Grok event did not fail explicitly"))
+            {
+                ok = false;
+                return;
+            }
+            const auto diagnostic = addon::decode_provider_event_diagnostic(outcome->message);
+            ok &= check(diagnostic && diagnostic->event_name == event_name && diagnostic->field == field &&
+                    diagnostic->problem == problem && !diagnostic->rule.empty(),
+                "Packaged Grok failure lost its exact event, malformed field or validation rule");
+            ok &= check(outcome->message.find("private_value_sentinel") == std::string::npos,
+                "Grok diagnostic included a native field value");
+        };
+    rejected("SessionStart", R"({"hook_event_name":"SessionStart"})",
+        "sessionId", addon::Provider_event_problem::MISSING);
+    rejected("StopFailure", R"({"hook_event_name":"StopFailure","sessionId":17})",
+        "sessionId", addon::Provider_event_problem::WRONG_TYPE);
+    rejected("UserPromptSubmit", R"({"hook_event_name":"UserPromptSubmit","sessionId":"private_value_sentinel\nsecond line"})",
+        "sessionId", addon::Provider_event_problem::CONTROL_CHARACTER);
+    rejected("pending_interaction", R"({"sessionId":"session-a","request_id":true,
+        "update":{"tool_call_id":"call-a","sessionUpdate":"pending_interaction","kind":"permission"}})",
+        "request_id", addon::Provider_event_problem::WRONG_TYPE);
+    rejected("pending_interaction", R"({"sessionId":"session-a","request_id":1,
+        "update":{"tool_call_id":"call-a","sessionUpdate":"pending_interaction"}})",
+        "update.kind", addon::Provider_event_problem::MISSING);
+    addon::Classify_event_request valid;
+    valid.event.name = "SessionStart";
+    valid.event.body = *addon::parse_json(R"({"hook_event_name":"SessionStart","sessionId":"session-a"})", {}, nullptr);
+    valid.transition_nonce = std::string(32, 'a');
+    const auto valid_id = host.invoke({"helper-ingress", 2}, addon::k_classify_event_operation,
+        addon::encode_classify_event_request(valid), 5000);
+    const auto accepted = host.wait_outcome(valid_id, 6000);
+    ok &= check(accepted && accepted->status == addon::Host_status::SUCCESS,
+        "Optional Grok source metadata became a required field");
+    ok &= check(host.shutdown(1000, nullptr), "Packaged Grok diagnostic adapter did not exit cleanly");
+    std::filesystem::remove_all(root);
+    return ok;
 }
 
 std::optional<addon::Lifecycle_declaration> package_lifecycle_declaration(const std::filesystem::path& package)
@@ -130,7 +199,7 @@ int main(int argc, char** argv)
     if (!check(declaration.has_value(), "package lifecycle declaration is unreadable")) {
         return 1;
     }
-    bool ok = execution_context_contract();
+    bool ok = classification_diagnostics(addon::path_from_utf8(argv[1])) && execution_context_contract();
     for (const std::string name : {"SessionStart", "UserPromptSubmit", "StopFailure", "StopCancelled", "SessionEnd"}) {
         auto request = hook(name);
         if (name == "SessionStart") {

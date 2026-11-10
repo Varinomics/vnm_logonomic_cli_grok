@@ -3,6 +3,7 @@
 #include "grok_json.h"
 
 #include <logonomic_cli_addon/limits.h>
+#include <logonomic_cli_addon/provider_event_diagnostic.h>
 
 #include <array>
 #include <algorithm>
@@ -16,21 +17,39 @@ namespace {
 namespace addon = logonomic::cli_addon;
 namespace json = addon::json;
 
-std::optional<std::string> metadata(const addon::Json_value& body, std::string_view key,
-    std::size_t bound = addon::limits::k_max_lifecycle_identity_bytes)
+std::optional<std::string> metadata(
+    const addon::Json_value& body,
+    std::string_view key,
+    std::size_t bound = addon::limits::k_max_lifecycle_identity_bytes,
+    addon::Contract_failure* failure = nullptr,
+    std::string_view event_name = {})
 {
     const auto* member = body.find(key);
-    if (!member || !member->is_string()) {
-        return std::nullopt;
+    const auto reject = [&](addon::Provider_event_problem problem) {
+        return addon::reject_provider_event(failure, addon::make_provider_event_diagnostic(
+            std::string(event_name), std::string(key), problem, member, bound, "nonempty_single_line_identity"));
+    };
+    if (!member) {
+        return reject(addon::Provider_event_problem::MISSING);
+    }
+    if (!member->is_string()) {
+        return reject(addon::Provider_event_problem::WRONG_TYPE);
     }
     const auto& value = member->as_string();
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) {
-        return std::nullopt;
+        return reject(addon::Provider_event_problem::EMPTY);
     }
     const auto result = value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
-    if (result.size() > bound || result.find_first_of(std::string_view("\0\r\n", 3)) != std::string::npos) {
-        return std::nullopt;
+    if (result.size() > bound) {
+        auto diagnostic = addon::make_provider_event_diagnostic(
+            std::string(event_name), std::string(key), addon::Provider_event_problem::TOO_LARGE,
+            member, bound, "nonempty_single_line_identity");
+        diagnostic.actual_size = result.size();
+        return addon::reject_provider_event(failure, std::move(diagnostic));
+    }
+    if (result.find_first_of(std::string_view("\0\r\n", 3)) != std::string::npos) {
+        return reject(addon::Provider_event_problem::CONTROL_CHARACTER);
     }
     return result;
 }
@@ -43,20 +62,68 @@ std::optional<std::string> interaction_kind(const addon::Json_value& body)
     return std::nullopt;
 }
 
-std::optional<addon::Classify_event_result> classify_interaction(const addon::Classify_event_request& request)
+std::optional<addon::Classify_event_result> classify_interaction(
+    const addon::Classify_event_request& request, addon::Contract_failure* failure)
 {
     const auto& body = request.event.body;
     const auto& update = json::member(body, "update");
     const auto session = json::text(body, "sessionId");
     const auto call_id = json::text(update, "tool_call_id");
+    const auto* request_id = body.find("request_id");
     const auto id = interaction_request_identity(json::member(body, "request_id"));
     const auto pending = request.event.name == "pending_interaction";
     const auto valid_identity = [](const std::string& value) {
         return !value.empty() && value.size() <= addon::limits::k_max_lifecycle_identity_bytes &&
             value.find_first_of(std::string_view("\0\r\n", 3)) == std::string::npos;
     };
-    if (!valid_identity(session) || !valid_identity(call_id) || !id ||
-        json::text(update, "sessionUpdate") != request.event.name || (pending && !interaction_kind(body))) return std::nullopt;
+    const auto reject_identity = [
+            &request,
+            failure
+        ](
+            std::string field,
+            const addon::Json_value* actual)
+        {
+            const auto problem = !actual ? addon::Provider_event_problem::MISSING :
+                !actual->is_string() ? addon::Provider_event_problem::WRONG_TYPE :
+                actual->as_string().empty() ? addon::Provider_event_problem::EMPTY :
+                actual->as_string().size() > addon::limits::k_max_lifecycle_identity_bytes
+                    ? addon::Provider_event_problem::TOO_LARGE : addon::Provider_event_problem::CONTROL_CHARACTER;
+            return addon::reject_provider_event(failure, addon::make_provider_event_diagnostic(
+                request.event.name, std::move(field), problem, actual,
+                addon::limits::k_max_lifecycle_identity_bytes, "native_interaction_identity"));
+        };
+    if (!valid_identity(session)) {
+        return reject_identity("sessionId", body.find("sessionId"));
+    }
+    if (!valid_identity(call_id)) {
+        return reject_identity("update.tool_call_id", update.find("tool_call_id"));
+    }
+    if (!id) {
+        const auto problem = !request_id ? addon::Provider_event_problem::MISSING :
+            !request_id->is_integer() && !request_id->is_string() ? addon::Provider_event_problem::WRONG_TYPE :
+            request_id->is_string() && request_id->as_string().empty() ? addon::Provider_event_problem::EMPTY :
+            request_id->is_string() && request_id->as_string().find('\0') != std::string::npos
+                ? addon::Provider_event_problem::CONTROL_CHARACTER : addon::Provider_event_problem::TOO_LARGE;
+        auto diagnostic = addon::make_provider_event_diagnostic(
+            request.event.name, "request_id", problem, request_id,
+            addon::limits::k_max_lifecycle_identity_bytes, "serialized_rpc_identity");
+        if (request_id && request_id->is_string() && problem == addon::Provider_event_problem::TOO_LARGE) {
+            diagnostic.actual_size = addon::serialize_json(*request_id).size();
+        }
+        return addon::reject_provider_event(failure, std::move(diagnostic));
+    }
+    if (json::text(update, "sessionUpdate") != request.event.name) {
+        return addon::reject_provider_event(failure, addon::make_provider_event_diagnostic(
+            request.event.name, "update.sessionUpdate", addon::Provider_event_problem::MISMATCH,
+            update.find("sessionUpdate"), {}, "matches_event_name"));
+    }
+    if (pending && !interaction_kind(body)) {
+        const auto* kind = update.find("kind");
+        return addon::reject_provider_event(failure, addon::make_provider_event_diagnostic(
+            request.event.name, "update.kind", !kind ? addon::Provider_event_problem::MISSING :
+                !kind->is_string() ? addon::Provider_event_problem::WRONG_TYPE : addon::Provider_event_problem::INVALID_VALUE,
+            kind, {}, "supported_interaction_kind"));
+    }
     addon::Classify_event_result result;
     if (!request.ledger.current_transition || request.ledger.current_transition->provider_session_id != session ||
         request.ledger.current_transition->nonce != request.transition_nonce) return result;
@@ -87,15 +154,22 @@ std::optional<std::string> interaction_request_identity(const addon::Json_value&
     return identity;
 }
 
-std::optional<addon::Classify_event_result> classify_hook(const addon::Classify_event_request& request)
+std::optional<addon::Classify_event_result> classify_hook(
+    const addon::Classify_event_request& request, addon::Contract_failure* failure)
 {
     if (request.event.name == "pending_interaction" || request.event.name == "interaction_resolved") {
-        return classify_interaction(request);
+        return classify_interaction(request, failure);
     }
     const auto& body = request.event.body;
-    const auto name = metadata(body, "hook_event_name");
-    if (!name || *name != request.event.name) {
+    const auto name = metadata(body, "hook_event_name", addon::limits::k_max_lifecycle_identity_bytes,
+        failure, request.event.name);
+    if (!name) {
         return std::nullopt;
+    }
+    if (*name != request.event.name) {
+        return addon::reject_provider_event(failure, addon::make_provider_event_diagnostic(
+            request.event.name, "hook_event_name", addon::Provider_event_problem::MISMATCH,
+            body.find("hook_event_name"), {}, "matches_event_name"));
     }
     addon::Classify_event_result result;
     constexpr std::array<std::string_view, 8> supported{
@@ -103,7 +177,8 @@ std::optional<addon::Classify_event_result> classify_hook(const addon::Classify_
         "Stop", "PostToolUse", "PostCompact"};
     if (std::find(supported.begin(), supported.end(), *name) == supported.end()) return result;
     if (metadata(body, "subagentType")) return result;
-    const auto session = metadata(body, "sessionId");
+    const auto session = metadata(body, "sessionId", addon::limits::k_max_lifecycle_identity_bytes,
+        failure, request.event.name);
     if (!session) return std::nullopt;
     if (request.context_failure) {
         result.context_failure = addon::Context_failure{*session, *request.context_failure};
@@ -181,9 +256,9 @@ void handle_lifecycle(addon::Invocation_context& context)
         context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
     }
-    const auto result = classify_hook(*request);
+    const auto result = classify_hook(*request, &failure);
     if (!result) {
-        context.fail(addon::Result_status::FAILED, "invalid_provider_event");
+        context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
     }
     if (typed) {
