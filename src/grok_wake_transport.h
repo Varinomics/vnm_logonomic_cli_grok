@@ -1,6 +1,7 @@
 #pragma once
 
 #include <logonomic_cli_addon/adapter_runtime.h>
+#include <chrono>
 #include <memory>
 #include <functional>
 #include <optional>
@@ -28,6 +29,7 @@ public:
     virtual ~Wake_runtime() = default;
     virtual bool write_control(std::string_view bytes) = 0;
     virtual Wake_poll poll() = 0;
+    virtual void wait(std::optional<std::chrono::steady_clock::time_point> deadline) = 0;
     virtual void reply(std::string_view bytes) = 0;
 };
 

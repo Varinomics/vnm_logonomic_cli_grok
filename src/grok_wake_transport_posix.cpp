@@ -329,6 +329,11 @@ public:
         return written;
     }
 
+    void wait(std::optional<Clock::time_point>) override
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     Wake_poll poll() override
     {
         Wake_poll result;

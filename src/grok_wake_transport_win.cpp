@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <set>
 #include <thread>
@@ -34,6 +35,112 @@ struct Handle
         if (*this) CloseHandle(value);
         value = next;
     }
+};
+
+struct io_result_t
+{
+    DWORD error;
+    DWORD count;
+};
+
+class Pipe_operation
+{
+public:
+    Pipe_operation() { m_overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr); }
+    ~Pipe_operation()
+    {
+        cancel();
+        if (m_overlapped.hEvent) {
+            CloseHandle(m_overlapped.hEvent);
+        }
+    }
+    Pipe_operation(const Pipe_operation&) = delete;
+    Pipe_operation& operator=(const Pipe_operation&) = delete;
+
+    bool valid() const { return m_overlapped.hEvent != nullptr; }
+    bool active() const { return m_file != INVALID_HANDLE_VALUE; }
+    HANDLE event() const { return m_overlapped.hEvent; }
+    const char* data() const { return m_buffer.data(); }
+
+    void connect(HANDLE file)
+    {
+        begin(file);
+        complete(ConnectNamedPipe(file, &m_overlapped));
+        if (m_result.error == ERROR_PIPE_CONNECTED) {
+            m_result.error = ERROR_SUCCESS;
+        }
+    }
+
+    void read(HANDLE file, std::size_t size)
+    {
+        m_buffer.resize(size);
+        begin(file);
+        complete(ReadFile(file, m_buffer.data(), (DWORD)m_buffer.size(), &m_result.count, &m_overlapped));
+    }
+
+    void write(HANDLE file, std::string_view bytes)
+    {
+        m_buffer.assign(bytes.begin(), bytes.end());
+        begin(file);
+        complete(WriteFile(file, m_buffer.data(), (DWORD)m_buffer.size(), &m_result.count, &m_overlapped));
+    }
+
+    std::optional<io_result_t> take()
+    {
+        if (!active()) {
+            return std::nullopt;
+        }
+        if (m_result.error == ERROR_IO_PENDING) {
+            if (!GetOverlappedResult(m_file, &m_overlapped, &m_result.count, FALSE)) {
+                const auto error = GetLastError();
+                if (error == ERROR_IO_INCOMPLETE) {
+                    return std::nullopt;
+                }
+                m_result.error = error;
+            }
+            else {
+                m_result.error = ERROR_SUCCESS;
+            }
+        }
+        m_file = INVALID_HANDLE_VALUE;
+        return m_result;
+    }
+
+    void cancel()
+    {
+        if (active() && m_result.error == ERROR_IO_PENDING) {
+            // CancelIoEx requests cancellation; only completion releases the
+            // kernel's access to this OVERLAPPED, event and buffer.
+            CancelIoEx(m_file, &m_overlapped);
+            DWORD count = 0;
+            GetOverlappedResult(m_file, &m_overlapped, &count, TRUE);
+        }
+        m_file = INVALID_HANDLE_VALUE;
+    }
+
+private:
+    void begin(HANDLE file)
+    {
+        ResetEvent(m_overlapped.hEvent);
+        const auto event = m_overlapped.hEvent;
+        m_overlapped = {};
+        m_overlapped.hEvent = event;
+        m_result = {};
+        m_file = file;
+    }
+
+    void complete(BOOL success)
+    {
+        m_result.error = success ? ERROR_SUCCESS : GetLastError();
+        if (m_result.error != ERROR_IO_PENDING) {
+            SetEvent(m_overlapped.hEvent);
+        }
+    }
+
+    OVERLAPPED m_overlapped{};
+    HANDLE m_file = INVALID_HANDLE_VALUE;
+    io_result_t m_result{};
+    std::vector<char> m_buffer;
 };
 
 std::wstring wide(std::string_view value)
@@ -151,9 +258,8 @@ bool wait_for_leader(HANDLE leader, const std::set<std::wstring>& preceding)
     return false;
 }
 
-Handle create_private_pipe(std::string_view token)
+Handle create_owned_pipe(const std::wstring& name, DWORD access, DWORD mode)
 {
-    const auto name = pipe_name(token);
     if (name.empty()) return {};
     HANDLE raw_token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw_token)) return {};
@@ -169,26 +275,54 @@ Handle create_private_pipe(std::string_view token)
     PSECURITY_DESCRIPTOR security = nullptr;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptor.c_str(), SDDL_REVISION_1, &security, nullptr)) return {};
     SECURITY_ATTRIBUTES attributes{sizeof(attributes), security, FALSE};
-    Handle pipe(CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+    Handle pipe(CreateNamedPipeW(name.c_str(), access | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        mode | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1, k_request_limit, k_request_limit, 0, &attributes));
     LocalFree(security);
     return pipe;
+}
+
+bool create_control_pipe(const std::wstring& name, bool parent_reads, Handle& parent, Handle& child)
+{
+    parent = create_owned_pipe(name, parent_reads ? PIPE_ACCESS_INBOUND : PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE);
+    Pipe_operation connection;
+    if (!parent || !connection.valid()) {
+        return false;
+    }
+    connection.connect(parent.value);
+    child.reset(CreateFileW(name.c_str(), parent_reads ? GENERIC_WRITE : GENERIC_READ,
+        0, nullptr, OPEN_EXISTING, 0, nullptr));
+    if (!child || WaitForSingleObject(connection.event(), 5000) != WAIT_OBJECT_0) {
+        return false;
+    }
+    const auto connected = connection.take();
+    return connected && connected->error == ERROR_SUCCESS;
 }
 
 class Windows_wake_runtime final : public Wake_runtime
 {
 public:
     Handle job, leader, tui, control, input, output, server;
-    bool connected = false;
-    bool received = false;
-    bool closed = false;
-    bool dropping_line = false;
-    std::string pending_output;
-    Clock::time_point connected_at;
+
+    bool initialize_io()
+    {
+        if (!m_connect.valid() || !m_client_read.valid() || !m_client_write.valid() ||
+            !m_control_read.valid() || !m_control_write.valid())
+        {
+            return false;
+        }
+        m_connect.connect(server.value);
+        m_control_read.read(output.value, 16384);
+        return true;
+    }
 
     ~Windows_wake_runtime() override
     {
+        m_connect.cancel();
+        m_client_read.cancel();
+        m_client_write.cancel();
+        m_control_read.cancel();
+        m_control_write.cancel();
         if (job) TerminateJobObject(job.value, 0);
         for (HANDLE process : {tui.value, control.value, leader.value}) {
             if (process != INVALID_HANDLE_VALUE) WaitForSingleObject(process, 5000);
@@ -197,82 +331,206 @@ public:
 
     bool write_control(std::string_view bytes) override
     {
-        DWORD written = 0;
-        return !closed && bytes.size() <= k_request_limit &&
-            WriteFile(input.value, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) && written == bytes.size();
+        if (m_closed || bytes.size() > k_request_limit || m_queued_bytes + bytes.size() > k_request_limit) {
+            return false;
+        }
+        m_control_queue.emplace_back(bytes);
+        m_queued_bytes += bytes.size();
+        if (!m_control_write.active()) {
+            start_control_write();
+        }
+        return true;
+    }
+
+    void wait(std::optional<Clock::time_point> deadline) override
+    {
+        const auto include_deadline = [&](Clock::time_point value) {
+            if (!deadline || value < *deadline) {
+                deadline = value;
+            }
+        };
+        if (m_connected) {
+            include_deadline(m_client_deadline);
+        }
+        if (m_control_write.active()) {
+            include_deadline(m_write_deadline);
+        }
+        std::vector<HANDLE> handles{tui.value, leader.value};
+        if (!m_closed) {
+            handles.push_back(control.value);
+        }
+        for (const auto* operation : {&m_connect, &m_client_read, &m_client_write, &m_control_read, &m_control_write}) {
+            if (operation->active()) {
+                handles.push_back(operation->event());
+            }
+        }
+        DWORD timeout = INFINITE;
+        if (deadline) {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(*deadline - Clock::now()).count();
+            timeout = (DWORD)std::clamp<long long>(remaining, 0, INFINITE - 1);
+        }
+        if (WaitForMultipleObjects((DWORD)handles.size(), handles.data(), FALSE, timeout) == WAIT_FAILED) {
+            m_wait_failed = true;
+        }
     }
 
     Wake_poll poll() override
     {
         Wake_poll result;
+        if (m_wait_failed) {
+            result.exit_code = 3;
+            return result;
+        }
         DWORD exit_code = 0;
         if (WaitForSingleObject(tui.value, 0) != WAIT_TIMEOUT) {
             GetExitCodeProcess(tui.value, &exit_code);
             result.exit_code = static_cast<int>(exit_code);
         }
         else if (WaitForSingleObject(leader.value, 0) != WAIT_TIMEOUT) result.exit_code = 3;
-        DWORD available = 0;
-        std::array<char, 16384> buffer{};
-        for (int read = 0; read < 8 && PeekNamedPipe(output.value, nullptr, 0, nullptr, &available, nullptr) && available; ++read) {
-            DWORD count = 0;
-            if (!ReadFile(output.value, buffer.data(), std::min<DWORD>(available, static_cast<DWORD>(buffer.size())), &count, nullptr)) break;
-            for (DWORD i = 0; i < count; ++i) {
-                if (buffer[i] == '\n') {
-                    if (!dropping_line) result.control_lines.push_back(std::move(pending_output));
-                    pending_output.clear();
-                    dropping_line = false;
-                }
-                else if (!dropping_line) {
-                    pending_output += buffer[i];
-                    if (pending_output.size() > 1024 * 1024) { pending_output.clear(); dropping_line = true; }
+        if (result.exit_code) {
+            return result;
+        }
+
+        if (const auto written = m_control_write.take()) {
+            if (written->error != ERROR_SUCCESS || written->count != m_control_queue.front().size()) {
+                close_control(result);
+            }
+            else {
+                m_queued_bytes -= m_control_queue.front().size();
+                m_control_queue.pop_front();
+                if (!m_control_queue.empty()) {
+                    start_control_write();
                 }
             }
         }
-        if (!closed && WaitForSingleObject(control.value, 0) != WAIT_TIMEOUT) {
-            closed = true;
-            result.control_closed = true;
+        poll_client(result);
+        if (result.request_disconnected && m_control_write.active()) {
+            close_control(result);
         }
-        if (!connected) {
-            const bool attached = ConnectNamedPipe(server.value, nullptr) != FALSE;
-            if (attached || GetLastError() == ERROR_PIPE_CONNECTED) {
-                connected = true;
-                connected_at = Clock::now();
-            }
+        if (m_control_write.active() && Clock::now() >= m_write_deadline) {
+            close_control(result);
         }
-        if (connected) {
-            if (!PeekNamedPipe(server.value, nullptr, 0, nullptr, &available, nullptr) ||
-                Clock::now() - connected_at > std::chrono::seconds(8)) {
-                DisconnectNamedPipe(server.value);
-                connected = received = false;
-                result.request_disconnected = true;
+        for (int read = 0; read < 8; ++read) {
+            const auto completed = m_control_read.take();
+            if (!completed) {
+                break;
             }
-            else if (!received && available) {
-                std::string request(k_request_limit, '\0');
-                DWORD count = 0;
-                if (!ReadFile(server.value, request.data(), static_cast<DWORD>(request.size()), &count, nullptr)) {
-                    DisconnectNamedPipe(server.value);
-                    connected = false;
-                    result.request_disconnected = true;
+            if (completed->error != ERROR_SUCCESS) {
+                close_control(result);
+                break;
+            }
+            for (DWORD i = 0; i < completed->count; ++i) {
+                const auto ch = m_control_read.data()[i];
+                if (ch == '\n') {
+                    if (!m_dropping_line) {
+                        result.control_lines.push_back(std::move(m_pending_output));
+                    }
+                    m_pending_output.clear();
+                    m_dropping_line = false;
                 }
-                else {
-                    request.resize(count);
-                    result.request = std::move(request);
-                    received = true;
+                else if (!m_dropping_line) {
+                    m_pending_output += ch;
+                    if (m_pending_output.size() > 1024 * 1024) {
+                        m_pending_output.clear();
+                        m_dropping_line = true;
+                    }
                 }
             }
+            m_control_read.read(output.value, 16384);
+        }
+        if (!m_closed && WaitForSingleObject(control.value, 0) != WAIT_TIMEOUT) {
+            close_control(result);
         }
         return result;
     }
 
     void reply(std::string_view bytes) override
     {
-        if (!connected) return;
-        DWORD written = 0;
-        WriteFile(server.value, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-        // The client reads the response before closing; disconnecting here
-        // would discard unread pipe bytes. poll reclaims a closed connection.
-        received = true;
+        if (!m_connected || m_client_write.active()) {
+            return;
+        }
+        m_reply_size = bytes.size();
+        m_client_write.write(server.value, bytes);
+        // A completed write can still leave unread pipe bytes. The outstanding
+        // read observes client closure; only that or expiry reclaims the pipe.
     }
+
+private:
+    void start_control_write()
+    {
+        m_control_write.write(input.value, m_control_queue.front());
+        m_write_deadline = Clock::now() + std::chrono::milliseconds(250);
+    }
+
+    void close_control(Wake_poll& result)
+    {
+        if (m_closed) {
+            return;
+        }
+        m_control_read.cancel();
+        m_control_write.cancel();
+        m_control_queue.clear();
+        m_queued_bytes = 0;
+        m_closed = result.control_closed = true;
+    }
+
+    void disconnect_client(Wake_poll& result)
+    {
+        m_client_read.cancel();
+        m_client_write.cancel();
+        DisconnectNamedPipe(server.value);
+        m_connected = m_received = false;
+        result.request_disconnected = true;
+        m_connect.connect(server.value);
+    }
+
+    void poll_client(Wake_poll& result)
+    {
+        if (const auto connected = m_connect.take()) {
+            if (connected->error != ERROR_SUCCESS) {
+                m_wait_failed = true;
+                result.exit_code = 3;
+                return;
+            }
+            m_connected = true;
+            m_client_deadline = Clock::now() + std::chrono::seconds(8);
+            m_client_read.read(server.value, k_request_limit);
+        }
+        if (!m_connected) {
+            return;
+        }
+        if (Clock::now() >= m_client_deadline) {
+            disconnect_client(result);
+            return;
+        }
+        if (const auto received = m_client_read.take()) {
+            if (received->error != ERROR_SUCCESS || m_received) {
+                disconnect_client(result);
+                return;
+            }
+            result.request = std::string(m_client_read.data(), received->count);
+            m_received = true;
+            m_client_read.read(server.value, 1);
+        }
+        if (const auto written = m_client_write.take()) {
+            if (written->error != ERROR_SUCCESS || written->count != m_reply_size) {
+                disconnect_client(result);
+            }
+        }
+    }
+
+    Pipe_operation m_connect, m_client_read, m_client_write, m_control_read, m_control_write;
+    bool m_connected = false;
+    bool m_received = false;
+    bool m_closed = false;
+    bool m_dropping_line = false;
+    bool m_wait_failed = false;
+    std::size_t m_reply_size = 0;
+    std::size_t m_queued_bytes = 0;
+    std::string m_pending_output;
+    std::deque<std::string> m_control_queue;
+    Clock::time_point m_client_deadline;
+    Clock::time_point m_write_deadline;
 };
 } // namespace
 
@@ -280,7 +538,7 @@ std::unique_ptr<Wake_runtime> start_wake_runtime(const std::string& token, const
 {
     if (native_argv.empty() || pipe_name(token).empty()) return {};
     auto runtime = std::make_unique<Windows_wake_runtime>();
-    runtime->server = create_private_pipe(token);
+    runtime->server = create_owned_pipe(pipe_name(token), PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
     runtime->job.reset(CreateJobObjectW(nullptr, nullptr));
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -298,13 +556,12 @@ std::unique_ptr<Wake_runtime> start_wake_runtime(const std::string& token, const
         "--no-exit-on-disconnect", "--relay-on-demand", "--no-auto-update"},
         runtime->job.value, {null.value, null.value, null.value}, false);
     if (!runtime->leader || !wait_for_leader(runtime->leader.value, preceding)) return {};
-    HANDLE read = INVALID_HANDLE_VALUE, write = INVALID_HANDLE_VALUE;
-    if (!CreatePipe(&read, &write, nullptr, k_request_limit)) return {};
-    Handle control_input(read);
-    runtime->input.reset(write);
-    if (!CreatePipe(&read, &write, nullptr, k_request_limit)) return {};
-    runtime->output.reset(read);
-    Handle control_output(write);
+    Handle control_input, control_output;
+    if (!create_control_pipe(pipe_name(token) + L".Input", false, runtime->input, control_input) ||
+        !create_control_pipe(pipe_name(token) + L".Output", true, runtime->output, control_output))
+    {
+        return {};
+    }
     runtime->control = spawn({native_argv[0], "agent", "--leader", "--leader-socket", endpoint, "stdio"},
         runtime->job.value, {control_input.value, control_output.value, null.value}, false);
     if (!runtime->control) return {};
@@ -313,6 +570,7 @@ std::unique_ptr<Wake_runtime> start_wake_runtime(const std::string& token, const
     runtime->tui = spawn(tui, runtime->job.value,
         {GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)}, true);
     if (!runtime->tui) return {};
+    if (!runtime->initialize_io()) return {};
     return runtime;
 }
 

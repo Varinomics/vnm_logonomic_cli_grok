@@ -84,6 +84,8 @@ public:
             json::text(*value, "disposition") == "accepted"), "existing wake/identity operation failed");
     }
 
+    void wait(std::optional<std::chrono::steady_clock::time_point>) override {}
+
     grok::Wake_poll poll() override
     {
         grok::Wake_poll event;

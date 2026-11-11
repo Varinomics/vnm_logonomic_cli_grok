@@ -4,6 +4,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 namespace json_util = logonomic::cli_addon::json;
 
@@ -73,6 +74,13 @@ public:
         m_scenario.replies.push_back(*value);
         if (json_util::text(*value, "reason") == "native_control_timeout") {
             m_phase = 6;
+        }
+    }
+
+    void wait(std::optional<std::chrono::steady_clock::time_point> deadline) override
+    {
+        if (m_scenario.timeout && m_phase == 4 && deadline) {
+            std::this_thread::sleep_until(*deadline);
         }
     }
 

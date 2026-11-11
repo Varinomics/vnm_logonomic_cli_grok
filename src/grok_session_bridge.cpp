@@ -8,7 +8,6 @@
 #include <logonomic_cli_addon/session_wake.h>
 #include <chrono>
 #include <cstdio>
-#include <thread>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -195,7 +194,7 @@ int serve(const std::string& token, const std::vector<std::string>& native_argv)
                 }
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        runtime->wait(request ? std::optional(request->deadline) : std::nullopt);
     }
 }
 } // namespace grok
