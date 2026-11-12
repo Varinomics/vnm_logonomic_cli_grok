@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/launch_preparation.h>
@@ -19,6 +20,7 @@
 #include <logonomic_cli_addon/session_contracts.h>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 namespace addon = logonomic::cli_addon;
@@ -159,7 +161,11 @@ public:
     std::string detail;
     const addon::Invoke_request& request() const override { return input; }
     bool cancel_requested() const override { return false; }
-    bool wait_for_cancel(int) override { return false; }
+    bool wait_for_cancel(int timeout_ms) override
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+        return false;
+    }
     void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
     void succeed(addon::Json_value value) override { succeeded = true; done = true; output = std::move(value); }
     void fail(addon::Result_status result, std::string reason, std::string text) override
