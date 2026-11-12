@@ -108,6 +108,7 @@ int native_peer(const std::vector<std::string>& args)
     auto read_paused  = event(token, "read-paused");
     auto response_allowed = event(token, "response-allowed", true);
     auto prompt_seen = event(token, "prompt-seen");
+    auto control_initialized = event(token, "control-initialized");
     for (std::string line; std::getline(std::cin, line);) {
         const auto query = json::parse(line);
         require(query.has_value(), "native fixture input was not JSON");
@@ -154,6 +155,9 @@ int native_peer(const std::vector<std::string>& args)
         }
         emit(json::object({{"jsonrpc", Json("2.0")}, {"id", json::member(*query, "id")},
             {"result", std::move(result)}}));
+        if (method == "initialize") {
+            SetEvent(control_initialized.get());
+        }
     }
     return 0;
 }
@@ -175,6 +179,7 @@ struct Peers
     Handle read_paused = event(token, "read-paused");
     Handle response_allowed = event(token, "response-allowed", true);
     Handle prompt_seen = event(token, "prompt-seen");
+    Handle control_initialized = event(token, "control-initialized");
 };
 
 class Session : public Peers
@@ -241,6 +246,10 @@ public:
 
     void initialize()
     {
+        // The TUI and ACP client start independently. Inspect only after the
+        // native initialize reply is in the bridge's pending control read.
+        require(WaitForSingleObject(control_initialized.get(), 12000) == WAIT_OBJECT_0,
+            "native control initialization did not complete");
         const auto observed = exchange(json::object({{"operation", Json("observe")}, {"token", Json(token)},
             {"transition_nonce", Json(std::string(32, 'b'))},
             {"event", json::object({{"hook_event_name", Json("SessionStart")}, {"sessionId", Json("native-session")}})}}));
