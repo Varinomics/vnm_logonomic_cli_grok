@@ -10,6 +10,8 @@ set(VNMCTL "${host_directory}/${vnmctl_name}")
 set(input "${WORK_DIRECTORY}/pretool.json")
 file(WRITE "${input}" "{\"hookEventName\":\"pre_tool_use\",\"hook_event_name\":\"PreToolUse\",\"sessionId\":\"root-session\"}")
 get_filename_component(helpers "${HELPER}" DIRECTORY)
+set(receipts "${WORK_DIRECTORY}/helper-receipts.jsonl")
+file(WRITE "${receipts}" "")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "LOGONOMIC_VNMCTL_PATH=${VNMCTL}"
@@ -18,6 +20,7 @@ execute_process(
         "LOGONOMIC_PROVIDER_GENERATION_DIGEST=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         "LOGONOMIC_PROVIDER_GENERATION_NONCE=cccccccccccccccccccccccccccccccc"
         "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
+        "GROK_HELPER_TEST_RECEIPTS=${receipts}"
         "${HELPER}"
     INPUT_FILE "${input}" OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
 # Grok's native command gate discards stdout on nonzero exit. Checking the
@@ -39,6 +42,7 @@ execute_process(
         "LOGONOMIC_PROVIDER_GENERATION_DIGEST=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         "LOGONOMIC_PROVIDER_GENERATION_NONCE=cccccccccccccccccccccccccccccccc"
         "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
+        "GROK_HELPER_TEST_RECEIPTS=${receipts}"
         "${HELPER}"
     INPUT_FILE "${input}" OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
 if(NOT status STREQUAL "0" OR NOT output STREQUAL "")
@@ -64,6 +68,7 @@ foreach(event IN ITEMS "post_compact;PostCompact" "post_tool_use;PostToolUse" "u
             "LOGONOMIC_PROVIDER_GENERATION_DIGEST=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             "LOGONOMIC_PROVIDER_GENERATION_NONCE=cccccccccccccccccccccccccccccccc"
             "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
+            "GROK_HELPER_TEST_RECEIPTS=${receipts}"
             "${HELPER}"
         INPUT_FILE "${input}" OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
     if(NOT status STREQUAL "0" OR NOT output STREQUAL "")
@@ -81,8 +86,19 @@ execute_process(
         "LOGONOMIC_PROVIDER_GENERATION_DIGEST=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         "LOGONOMIC_PROVIDER_GENERATION_NONCE=cccccccccccccccccccccccccccccccc"
         "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
+        "GROK_HELPER_TEST_RECEIPTS=${receipts}"
         "${HELPER}"
     INPUT_FILE "${input}" OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
 if(NOT status STREQUAL "0" OR NOT output STREQUAL "")
     message(FATAL_ERROR "Native SessionStart lost its exact default directory: ${status}: ${errors}")
+endif()
+
+# Validate the actual package once, then enforce every original classifier
+# assertion on the exact deliveries received within the native helper budget.
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
+        "${VNMCTL}" --verify-deliveries "${receipts}"
+    OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
+if(NOT status STREQUAL "0")
+    message(FATAL_ERROR "Native helper evidence did not survive packaged classification: ${status}: ${errors}")
 endif()

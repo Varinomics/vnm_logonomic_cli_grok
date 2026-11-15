@@ -1,6 +1,7 @@
 #include "grok_lifecycle.h"
 #include "grok_context.h"
 #include "grok_json.h"
+#include "grok_observer.h"
 
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/provider_event_diagnostic.h>
@@ -239,7 +240,7 @@ std::optional<addon::Classify_event_result> classify_hook(
     return result;
 }
 
-void handle_lifecycle(addon::Invocation_context& context)
+void handle_lifecycle(addon::Invocation_context& context, Lifecycle_observer* observer)
 {
     if (context.request().operation != addon::k_classify_event_operation) {
         context.reject_unknown_operation();
@@ -256,7 +257,7 @@ void handle_lifecycle(addon::Invocation_context& context)
         context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
     }
-    const auto result = classify_hook(*request, &failure);
+    const auto result = observer ? observer->classify(*request, &failure) : classify_hook(*request, &failure);
     if (!result) {
         context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;

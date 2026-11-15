@@ -3,6 +3,7 @@
 #include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/lifecycle_events.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
@@ -82,6 +83,11 @@ bool classification_diagnostics(const std::filesystem::path& package)
     valid.event.name = "SessionStart";
     valid.event.body = *addon::parse_json(R"({"hook_event_name":"SessionStart","sessionId":"session-a"})", {}, nullptr);
     valid.transition_nonce = std::string(32, 'a');
+    const auto reserve_id = host.invoke({"lifecycle-correlation-lifetime", 1}, "reserve",
+        addon::encode_lifecycle_correlation_reserve_request({{valid.transition_nonce}}), 5000);
+    const auto reserved = host.wait_outcome(reserve_id, 6000);
+    ok &= check(reserved && reserved->status == addon::Host_status::SUCCESS,
+        "The host must reserve a lifecycle correlation before root classification");
     const auto valid_id = host.invoke({"helper-ingress", 2}, addon::k_classify_event_operation,
         addon::encode_classify_event_request(valid), 5000);
     const auto accepted = host.wait_outcome(valid_id, 6000);

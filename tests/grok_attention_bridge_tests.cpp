@@ -184,10 +184,23 @@ int wrapper(int argc, char** argv)
     }
     const auto delivery = json::parse(input);
     require(delivery.has_value(), "helper delivery was not JSON");
+    // Receipt is the timed helper operation. The persistent host below
+    // validates the package once and classifies these exact delivered bytes;
+    // cold package validation is not part of the production helper budget.
+    std::ofstream log(addon::path_from_utf8(std::getenv("GROK_ATTENTION_TEST_LOG")), std::ios::app);
+    log << input << '\n';
+    log.close();
+    require(log.good(), "fixture receipt write failed");
+    std::fputs("{\"accepted\":true}\n", stdout);
+    return std::fflush(stdout) == 0 ? 0 : 1;
+}
+
+addon::Attention_classification_result classify_delivery(addon::Host_simulator& host, const Json& delivery)
+{
     addon::Classify_event_request request;
-    request.event.name = json::text(json::member(*delivery, "event"), "name");
-    request.event.body = json::member(json::member(*delivery, "event"), "body");
-    request.transition_nonce = json::text(*delivery, "transition_nonce");
+    request.event.name = json::text(json::member(delivery, "event"), "name");
+    request.event.body = json::member(json::member(delivery, "event"), "body");
+    request.transition_nonce = json::text(delivery, "transition_nonce");
     request.ledger.current_epoch = 1;
     request.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "native-session", k_nonce};
     const auto& update = json::member(request.event.body, "update");
@@ -197,10 +210,6 @@ int wrapper(int argc, char** argv)
         json::text(request.event.body, "sessionId") == "native-session",
         "bridge changed native interaction identity");
 
-    addon::Simulator_options options;
-    options.package_directory = addon::path_from_utf8(std::getenv(addon::k_helper_env_helpers_dir)).parent_path();
-    addon::Host_simulator host(options, nullptr);
-    require(host.start(nullptr), "packaged adapter did not start");
     const auto invoke = [&](const char* capability, Json payload) {
         const std::uint16_t version = std::string_view(capability) == "helper-ingress" ? 2 : 1;
         const auto id = host.invoke({capability, version},
@@ -228,7 +237,8 @@ int wrapper(int argc, char** argv)
     require(pending ? typed->attention_kind && typed->attention_kind->observation_index == 0 &&
         typed->attention_kind->kind == (kind == "permission" || kind == "plan_approval" ? "permission" : "interactive_question")
         : !typed->attention_kind, "native interaction kind was misclassified");
-    const addon::Directory_package_source source(options.package_directory);
+    const addon::Directory_package_source source(
+        addon::path_from_utf8(std::getenv(addon::k_helper_env_helpers_dir)).parent_path());
     const auto sidecar_bytes = source.read("capabilities/lifecycle-events@2.json", 16384, nullptr);
     const auto sidecar = sidecar_bytes ? addon::parse_sidecar(*sidecar_bytes, nullptr) : std::nullopt;
     const auto declaration = sidecar ? addon::decode_lifecycle_declaration(sidecar->payload, nullptr) : std::nullopt;
@@ -240,13 +250,7 @@ int wrapper(int argc, char** argv)
         require(stale && stale->classification == addon::Classification::IGNORED && stale->observations.empty(),
             "a delayed delivery crossed the host's transition epoch");
     }
-    std::ofstream log(addon::path_from_utf8(std::getenv("GROK_ATTENTION_TEST_LOG")), std::ios::app);
-    log << addon::serialize_json(addon::encode_attention_classification_result(*typed)) << '\n';
-    require(log.good(), "fixture receipt write failed");
-    int exit_code = -1;
-    require(host.shutdown(1000, &exit_code) && exit_code == 0, "packaged adapter did not shut down");
-    std::fputs("{\"accepted\":true}\n", stdout);
-    return std::fflush(stdout) == 0 ? 0 : 1;
+    return *typed;
 }
 } // namespace
 
@@ -280,6 +284,10 @@ int main(int argc, char** argv)
         environment(addon::k_helper_env_generation_nonce, std::string(32, 'c'));
         environment(addon::k_helper_env_helpers_dir, addon::path_to_utf8(package / "helpers"));
         environment("GROK_ATTENTION_TEST_LOG", argv[3]);
+        addon::Simulator_options options;
+        options.package_directory = package;
+        addon::Host_simulator host(options, nullptr);
+        require(host.start(nullptr), "packaged adapter did not start");
         for (const bool resumed : {false, true}) {
             resume = resumed;
             native_writes = 0;
@@ -290,9 +298,8 @@ int main(int argc, char** argv)
             std::vector<addon::Attention_classification_result> observed;
             for (std::string line; std::getline(receipt, line);) {
                 const auto value = json::parse(line);
-                const auto result = value ? addon::decode_attention_classification_result(*value, nullptr) : std::nullopt;
-                require(result.has_value(), "fixture receipt is invalid");
-                observed.push_back(*result);
+                require(value.has_value(), "fixture receipt is invalid");
+                observed.push_back(classify_delivery(host, *value));
             }
             const std::vector<int> expected_ids{31, 32, 33, 34, 32, 31, 35, 35, 36, 36, 34, 33, 37};
             require(observed.size() == expected_ids.size(),
@@ -304,6 +311,8 @@ int main(int argc, char** argv)
             require(observed.back().base.observations.front().attention_transition == addon::Attention_transition::REQUESTED,
                 "transport or epoch loss fabricated an exact prompt resolution");
         }
+        int exit_code = -1;
+        require(host.shutdown(1000, &exit_code) && exit_code == 0, "packaged adapter did not shut down");
         std::cout << "Grok native interaction bridge tests passed\n";
         return 0;
     }

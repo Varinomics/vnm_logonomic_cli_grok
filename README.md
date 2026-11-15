@@ -24,9 +24,15 @@ itself refreshes the credential. On Linux and macOS the helper uses libcurl, so
 building the package needs its development files.
 
 Native file hooks report session and turn starts through authenticated SDK
-helper ingress. Successful turn completion and subagent completion are not
-advertised: Grok's Stop hooks are gates that may continue the turn, and the
-file-hook channel has no matching confirmed subagent completion producer.
+helper ingress. Native child visibility combines authenticated `SubagentStart`
+hooks with incremental `updates.jsonl` observation through the shared framework
+filesystem service. Durable `subagent_spawned` and `subagent_finished` records
+open and close separate intervals for each native `attempt_id`, including deeper
+descendants. Every child remains routed to its authenticated root. Historical
+rows are excluded, and blockable Stop/SubagentStop hooks never supply terminal
+evidence. Root completion and child quiescence remain separate facts. See
+[native subagent observation](docs/native_subagents.md) for ownership, recording,
+ordering and failure boundaries.
 Managed configuration targets only `hooks/logonomic.json` within the selected
 Grok home, under the host's bounded snapshot-and-replacement contract. The
 persisted command is inactive without Logonomic's launch authority and resolves
@@ -184,6 +190,19 @@ Follow workstation build
 queue and toolchain instructions for configuration and compilation. CTest
 registers runtime, account/probe, usage, package-validation and conformance
 fixtures. Building a package does not activate it or migrate user data.
+
+The filesystem observer links the maintained framework leaf and QtCore. Set
+`GROK_FRAMEWORK_SOURCE` for a local framework checkout; otherwise the build uses
+an installed leaf or the owned `master` source. The shared SDK package recipe
+deploys each program's complete native runtime closure, including QtCore and the
+quota helper's HTTP libraries, with notices and exact runtime provenance.
+`GROK_QTBASE_SOURCE` selects the matching qtbase notice source.
+`GROK_RUNTIME_NOTICES_DIRECTORY` supplies additional runtime notices named
+`<library filename>.txt`; Linux `GROK_LINUX_RUNTIME_MATERIAL` supplies verified
+acquisition facts for non-dpkg inputs. Provider CI delegates dependency and
+notice acquisition to the same selected SDK through its thin preparation script.
+`grok_package_runtime_closure` checks the assembled package's private runtime
+closure; package validation and conformance remain separate gates.
 
 The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
 during configuration. `cmake --install` exports a fresh artifact beneath its install-time

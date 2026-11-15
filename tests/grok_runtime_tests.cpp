@@ -459,13 +459,18 @@ void managed_configuration_contract()
 {
 #ifdef _WIN32
     const auto fixture_name = "grok_legacy_hooks_windows.json";
+    const auto previous_name = "grok_previous_hooks_windows.json";
 #else
     const auto fixture_name = "grok_legacy_hooks_posix.json";
+    const auto previous_name = "grok_previous_hooks_posix.json";
 #endif
     std::ifstream fixture(addon::path_from_utf8(GROK_TEST_FIXTURE_DIR) / fixture_name, std::ios::binary);
     require(fixture.is_open(), "The historical hook fixture must be available");
     const std::string legacy((std::istreambuf_iterator<char>(fixture)), std::istreambuf_iterator<char>());
     require(!fixture.bad() && !legacy.empty(), "The historical hook fixture must be readable");
+    std::ifstream previous_fixture(addon::path_from_utf8(GROK_TEST_FIXTURE_DIR) / previous_name, std::ios::binary);
+    const std::string previous((std::istreambuf_iterator<char>(previous_fixture)), std::istreambuf_iterator<char>());
+    require(!previous_fixture.bad() && !previous.empty(), "The immediately previous managed hook fixture must be readable");
     const auto desired = grok::hook_configuration();
     const auto transform = [](bool present, const std::string& content) {
         Context context;
@@ -479,7 +484,7 @@ void managed_configuration_contract()
         return context;
     };
     for (const auto& input : std::vector<std::pair<bool, std::string>>{
-        {false, {}}, {true, desired}, {true, legacy}})
+        {false, {}}, {true, desired}, {true, previous}, {true, legacy}})
     {
         const auto context = transform(input.first, input.second);
         const auto request = addon::decode_managed_configuration_transform_request(context.input.payload, nullptr);

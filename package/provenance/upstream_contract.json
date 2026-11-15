@@ -104,5 +104,19 @@
       "scope": "Official native binary with isolated profile, loopback scripted model backend and capture hook. ACP new/new/cold load emits new/new/load. Manual TUI /clear creates a new UUID before any prompt; selecting the already-open prior UUID through /resume emits no new start hook. After restarting the native process, manual picker selection of that stopped conversation emits load with its original UUID. These observations do not assert full Logonomic desktop integration."
     },
     "boundaries": "Already-open picker selection returns no effects and changes only AppView; resident attach skips actor registration. Neither provides authoritative activation evidence. Source new can also describe a resumed empty history. Observe hooks cannot veto native switching or enforce exclusive conversation ownership. Long-cwd slug/hash paths remain unknown to inspection until their native computed path can be verified. Cross-worktree ownership belongs to the shared host."
+  },
+  "native_subagents": {
+    "source_snapshot": "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8",
+    "contracts": [
+      "crates/codegen/xai-grok-shell/src/extensions/notification.rs",
+      "crates/codegen/xai-grok-shell/src/session/storage/mod.rs",
+      "crates/codegen/xai-grok-shell/src/session/storage/jsonl/mod.rs",
+      "crates/codegen/xai-grok-shell/src/session/acp_session_impl/updates.rs",
+      "crates/codegen/xai-grok-hooks/src/dispatcher.rs",
+      "crates/codegen/xai-grok-hooks/src/event.rs"
+    ],
+    "wire": "Authenticated root SessionStart binds its transition nonce, native root identity and transcriptPath. The parent actor awaits SubagentStart before persisting subagent_spawned; its hook admits a byte frontier. SessionUpdateEnvelope uses method _x.ai/session/update and params.sessionId with params.update containing snake_case subagent_id, child_session_id, parent_session_id, attempt_id and subagent_type. Matching subagent_finished status completed, failed or cancelled closes only that native attempt. Blockable SubagentStop is not terminal evidence.",
+    "scope": "Persistent incremental journal observation through the shared framework filesystem service, including deeper descendants after immutable ancestry joins. Child facts always route to the authenticated root, with no root lifecycle fields or invented session-wide sequence. Existing history, unauthenticated inventory, incomplete rows and retired epochs cannot mint child spans. Observe and consumption cursors remain independent; the final root END page is retained until exact terminal retirement.",
+    "boundaries": "Native recording and usable native attempt identities are required. The bounded reader detects observed truncation or changes at its retained byte frontier; it does not claim whole-file integrity or universal physical-object leases. Interactive child visibility does not establish delegated background drainage or atomic native session closure."
   }
 }

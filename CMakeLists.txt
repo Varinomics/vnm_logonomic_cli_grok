@@ -37,6 +37,8 @@ else()
     endif()
 endif()
 
+include(cmake/grok_observation_dependency.cmake)
+
 function(grok_target target)
     target_link_libraries(${target} PRIVATE logonomic_cli_addon_sdk::sdk)
     if(MSVC)
@@ -58,6 +60,7 @@ add_library(grok_provider STATIC
     src/grok_configuration.cpp
     src/grok_context.cpp
     src/grok_lifecycle.cpp
+    src/grok_observer.cpp
     src/grok_preparation.cpp
     src/grok_resume.cpp
     src/grok_probes.cpp
@@ -68,7 +71,8 @@ target_sources(grok_provider PRIVATE
     src/grok_wake_transport_win.cpp src/grok_wake_transport_posix.cpp)
 grok_target(grok_provider)
 target_include_directories(grok_provider PUBLIC src)
-target_link_libraries(grok_provider PUBLIC logonomic_cli_addon_sdk::sdk)
+target_link_libraries(grok_provider PUBLIC logonomic_cli_addon_sdk::sdk
+    vnm_framework::vnm_filesystem_observation)
 if(WIN32)
     target_link_libraries(grok_provider PRIVATE advapi32)
 endif()
@@ -103,9 +107,18 @@ endif()
 logonomic_cli_addon_package_platform(GROK_PLATFORM)
 set(GROK_EXECUTABLE_SUFFIX "${CMAKE_EXECUTABLE_SUFFIX}")
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
-logonomic_cli_addon_add_package(grok_package logonomic.cli.grok GROK_PACKAGE_DIRECTORY
+set(GROK_QTBASE_SOURCE "" CACHE PATH "qtbase source matching the selected Qt runtime (notices)")
+set(GROK_RUNTIME_NOTICES_DIRECTORY "" CACHE PATH
+    "Copyright/license files for external runtimes, named <library filename>.txt")
+set(GROK_LINUX_RUNTIME_MATERIAL "" CACHE FILEPATH
+    "Exact prebuilt input provenance from the selected Qt/runtime acquisition")
+logonomic_cli_addon_add_qt_package(grok_package logonomic.cli.grok GROK_PACKAGE_DIRECTORY
     ADAPTER grok_adapter
     HELPERS grok_helper grok_launch_bridge grok_session_bridge grok_quota_bridge
+    QTBASE_SOURCE "${GROK_QTBASE_SOURCE}"
+    RUNTIME_NOTICES "${GROK_RUNTIME_NOTICES_DIRECTORY}"
+    LINUX_RUNTIME_MATERIAL "${GROK_LINUX_RUNTIME_MATERIAL}"
+    OUT_RUNTIME_CHECK GROK_RUNTIME_CHECK
     INDEX_ARGUMENTS
         --third-party "assets/grok.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
@@ -118,6 +131,18 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
     return()
 endif()
 enable_testing()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+get_target_property(_grok_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
+add_test(NAME grok_dependency_preparation_tests
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/test_prepare_ci.py"
+        --sdk "${_grok_sdk_source}")
+add_test(NAME grok_package_runtime_closure COMMAND ${GROK_RUNTIME_CHECK})
+set_tests_properties(grok_dependency_preparation_tests grok_package_runtime_closure PROPERTIES TIMEOUT 120)
+add_executable(grok_observer_tests tests/grok_observer_tests.cpp)
+target_link_libraries(grok_observer_tests PRIVATE grok_provider)
+grok_target(grok_observer_tests)
+add_test(NAME grok_observer_tests COMMAND grok_observer_tests)
+set_tests_properties(grok_observer_tests PROPERTIES TIMEOUT 90)
 foreach(test_name IN ITEMS
     grok_runtime_tests grok_initial_prompt_tests grok_acp_tests grok_probe_tests
     grok_usage_tests grok_wake_protocol_tests grok_wake_identity_tests grok_context_tests)
@@ -228,6 +253,7 @@ option(LOGONOMIC_CLI_ADDON_RECIPE_TESTS
 if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     get_target_property(_membership_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
+    FetchContent_GetProperties(logonomic_cli_addon_qt_notices SOURCE_DIR _grok_qt_notices_source)
     add_test(NAME grok_package_membership
         COMMAND "${Python3_EXECUTABLE}" "${_membership_sdk_source}/cmake/package_membership_tests.py"
             "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
@@ -236,6 +262,18 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
             "--generator-platform=${CMAKE_GENERATOR_PLATFORM}" "--toolset=${CMAKE_GENERATOR_TOOLSET}"
             "--toolchain=${CMAKE_TOOLCHAIN_FILE}" "--compiler=${CMAKE_CXX_COMPILER}"
             "--make-program=${CMAKE_MAKE_PROGRAM}" "--prefix-path=${CMAKE_PREFIX_PATH}"
+            "--cmake-definition=GROK_FRAMEWORK_SOURCE=${grok_framework_source}"
+            "--cmake-definition=FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH=${grok_dispatch_source}"
+            "--cmake-definition=FETCHCONTENT_SOURCE_DIR_VNM_CMAKE=${grok_vnm_cmake_source}"
+            "--cmake-definition=vnm_filesystem_observation_DIR=${vnm_filesystem_observation_DIR}"
+            "--cmake-definition=vnm_qt_dispatch_DIR=${vnm_qt_dispatch_DIR}"
+            "--cmake-definition=GROK_QTBASE_SOURCE=${GROK_QTBASE_SOURCE}"
+            "--cmake-definition=FETCHCONTENT_SOURCE_DIR_LOGONOMIC_CLI_ADDON_QT_NOTICES=${_grok_qt_notices_source}"
+            "--cmake-definition=GROK_RUNTIME_NOTICES_DIRECTORY=${GROK_RUNTIME_NOTICES_DIRECTORY}"
+            "--cmake-definition=GROK_LINUX_RUNTIME_MATERIAL=${GROK_LINUX_RUNTIME_MATERIAL}"
+            "--cmake-definition=CMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}"
+            "--cmake-definition=VNM_FILESYSTEM_OBSERVATION_BUILD_TESTS=OFF"
+            "--cmake-definition=VNM_QT_DISPATCH_BUILD_TESTING=OFF"
             "--validator=$<TARGET_FILE:logonomic_cli_addon_validate>" "--platform=${GROK_PLATFORM}")
     set_tests_properties(grok_package_membership PROPERTIES
         TIMEOUT 1800 RESOURCE_LOCK cli_addon_recipe_rebuild LABELS "cli-addon;delivery;recipe;owning-path")

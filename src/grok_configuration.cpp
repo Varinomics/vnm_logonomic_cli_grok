@@ -49,7 +49,7 @@ std::string hooks_for_events(std::initializer_list<const char*> events)
 std::string hook_configuration()
 {
     return hooks_for_events({"SessionStart", "SessionEnd", "UserPromptSubmit",
-        "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact"});
+        "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact", "SubagentStart"});
 }
 void transform_configuration(addon::Invocation_context& context)
 {
@@ -64,6 +64,8 @@ void transform_configuration(addon::Invocation_context& context)
     // directory. Only the exact previous generated output is also ours;
     // preserve refusal for a user-modified or otherwise foreign file.
     if (request->present && request->content != desired &&
+        request->content != hooks_for_events({"SessionStart", "SessionEnd", "UserPromptSubmit",
+            "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact"}) &&
         request->content != hooks_for_events({"SessionStart", "SessionEnd", "UserPromptSubmit",
             "PreToolUse", "StopFailure", "StopCancelled"}))
     {

@@ -9,9 +9,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -26,7 +28,7 @@ bool check(bool condition, const char* message)
     return condition;
 }
 
-bool packaged_execution_context(const addon::Json_value& delivery)
+bool packaged_execution_context(addon::Host_simulator& host, const addon::Json_value& delivery)
 {
     const auto& event = json::member(delivery, "event");
     addon::Classify_event_request request;
@@ -45,17 +47,19 @@ bool packaged_execution_context(const addon::Json_value& delivery)
     {
         return false;
     }
-    addon::Simulator_options options;
-    options.package_directory = addon::path_from_utf8(helpers).parent_path();
-    addon::Host_simulator host(options, nullptr);
-    addon::Contract_failure failure;
-    if (!check(host.start(&failure), failure.detail.c_str())) {
-        return false;
-    }
     const auto capabilities = host.live_capabilities();
     if (!check(std::any_of(capabilities.begin(), capabilities.end(), [](const auto& capability) {
             return capability.capability_id == "execution-context" && capability.version == 1;
         }), "packaged adapter did not negotiate execution-context@1"))
+    {
+        return false;
+    }
+    auto reservation = addon::Json_value::object();
+    reservation.set("transition_nonce", addon::Json_value(request.transition_nonce));
+    const auto reserved = host.wait_outcome(host.invoke({"lifecycle-correlation-lifetime", 1},
+        "reserve", std::move(reservation), 4000), 4500);
+    if (!check(reserved && reserved->status == addon::Host_status::SUCCESS,
+            "fixture host did not reserve the SessionStart delivery nonce"))
     {
         return false;
     }
@@ -72,12 +76,10 @@ bool packaged_execution_context(const addon::Json_value& delivery)
     {
         return false;
     }
-    int exit_code = -1;
-    return check(host.shutdown(1000, &exit_code) && exit_code == 0,
-        "packaged execution adapter did not shut down cleanly");
+    return true;
 }
 
-bool packaged_context(const addon::Json_value& delivery)
+bool packaged_context(addon::Host_simulator& host, const addon::Json_value& delivery)
 {
     const auto& event = json::member(delivery, "event");
     addon::Classify_event_request request;
@@ -97,13 +99,6 @@ bool packaged_context(const addon::Json_value& delivery)
             transcript.parent_path().filename() == "native-session",
             "native helper did not preserve context evidence"))
     {
-        return false;
-    }
-    addon::Simulator_options options;
-    options.package_directory = addon::path_from_utf8(helpers).parent_path();
-    addon::Host_simulator host(options, nullptr);
-    addon::Contract_failure failure;
-    if (!check(host.start(&failure), failure.detail.c_str())) {
         return false;
     }
     const auto capabilities = host.live_capabilities();
@@ -192,6 +187,40 @@ bool packaged_context(const addon::Json_value& delivery)
             return false;
         }
     }
+    return true;
+}
+
+bool verify_deliveries(const char* path)
+{
+    std::ifstream input(addon::path_from_utf8(path));
+    std::vector<addon::Json_value> deliveries;
+    for (std::string line; std::getline(input, line);) {
+        const auto delivery = addon::parse_json(line, {}, nullptr);
+        if (!check(delivery.has_value(), "invalid helper receipt")) return false;
+        deliveries.push_back(*delivery);
+    }
+    if (!check(input.eof() && deliveries.size() == 4,
+            "native helper deliveries did not reach the fixture exactly once"))
+    {
+        return false;
+    }
+    const auto* helpers = std::getenv("LOGONOMIC_PROVIDER_HELPERS_DIR");
+    if (!check(helpers != nullptr, "missing packaged helpers directory")) return false;
+    addon::Simulator_options options;
+    options.package_directory = addon::path_from_utf8(helpers).parent_path();
+    addon::Host_simulator host(options, nullptr);
+    addon::Contract_failure failure;
+    if (!check(host.start(&failure), failure.detail.c_str())) return false;
+    const char* expected_names[] = {"PostCompact", "PostToolUse", "UserPromptSubmit", "SessionStart"};
+    for (std::size_t i = 0; i < deliveries.size(); ++i) {
+        const auto& delivery = deliveries[i];
+        const auto name = json::text(json::member(delivery, "event"), "name");
+        if (!check(name == expected_names[i], "native helper delivery order changed") ||
+            !(name == "SessionStart" ? packaged_execution_context(host, delivery) : packaged_context(host, delivery)))
+        {
+            return false;
+        }
+    }
     int exit_code = -1;
     return check(host.shutdown(1000, &exit_code) && exit_code == 0,
         "packaged adapter did not shut down cleanly");
@@ -201,6 +230,9 @@ bool packaged_context(const addon::Json_value& delivery)
 
 int main(int argc, char** argv)
 {
+    if (argc == 3 && std::string(argv[1]) == "--verify-deliveries") {
+        return verify_deliveries(argv[2]) ? 0 : 1;
+    }
     const bool provider_event = argc == 4 && std::string(argv[1]) == "provider-event";
     if (provider_event && std::string(argv[2]) == "acknowledge") {
         return 0;
@@ -219,10 +251,15 @@ int main(int argc, char** argv)
     }
     const auto value = addon::parse_json(input, {}, nullptr);
     if (provider_event) {
-        const bool execution = value && json::text(json::member(*value, "event"), "name") == "SessionStart";
-        if (!value || !(execution ? packaged_execution_context(*value) : packaged_context(*value))) {
-            return 2;
-        }
+        // Preserve exact helper bytes inside its production deadline. Package
+        // validation and classifier assertions run once in --verify-deliveries,
+        // outside the timed wrapper just as in a persistent host generation.
+        const auto* receipt = std::getenv("GROK_HELPER_TEST_RECEIPTS");
+        if (!value || !receipt) return 2;
+        std::ofstream output(addon::path_from_utf8(receipt), std::ios::app);
+        output << input << '\n';
+        output.close();
+        if (!check(output.good(), "helper receipt write failed")) return 2;
         std::fputs("{\"accepted\":true}\n", stdout);
         return std::fflush(stdout) == 0 ? 0 : 1;
     }

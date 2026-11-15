@@ -3,6 +3,7 @@
 #include "grok_launcher.h"
 #include "grok_launcher_approval.h"
 #include "grok_lifecycle.h"
+#include "grok_observer.h"
 #include "grok_preparation.h"
 #include "grok_probes.h"
 #include "grok_usage.h"
@@ -10,6 +11,7 @@
 #include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <exception>
+#include <memory>
 namespace {
 namespace addon = logonomic::cli_addon;
 void discovery(addon::Invocation_context& context)
@@ -31,7 +33,7 @@ void discovery(addon::Invocation_context& context)
     }
     else context.reject_unknown_operation();
 }
-void invoke(addon::Invocation_context& context)
+void invoke(addon::Invocation_context& context, grok::Lifecycle_observer& observer)
 {
     try {
         const auto& capability = context.request().capability.capability_id;
@@ -45,7 +47,11 @@ void invoke(addon::Invocation_context& context)
         else if (capability == "auth-status" || capability == "quota") grok::handle_probes(context);
         else if (capability == "usage-scan") grok::handle_usage(context);
         else if (capability == "managed-configuration") grok::transform_configuration(context);
-        else if (capability == "helper-ingress" || capability == addon::k_attention_kind_capability_id) grok::handle_lifecycle(context);
+        else if (capability == "helper-ingress" || capability == "lifecycle-events" ||
+            capability == "lifecycle-correlation-lifetime" || capability == addon::k_attention_kind_capability_id)
+        {
+            observer.handle(context);
+        }
         else if (capability == "session-wake") grok::handle_wake(context);
         else if (capability == "profile-storage" && context.request().operation == "acknowledge") {
             addon::acknowledge_profile_storage(context);
@@ -69,13 +75,16 @@ int main()
         {"managed-configuration", 2}, {"profile-storage", 1}, {"accounts", 2},
         {"auth-status", 2}, {"quota", 2}, {"quota-failure", 1}, {"usage-scan", 3}, {"usage-temporal", 1},
         {"lifecycle-events", 2}, {"helper-ingress", 2}, {"context-state", 2}, {"coordination-delivery", 1},
+        {"lifecycle-correlation-lifetime", 1},
         {"model-context-delivery", 1}, {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
         {"execution-context", 1}, {"structured-session", 3}, {"delegated-session", 3},
         {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
         {"session-wake", 1},
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
     };
+    const auto observation_service = std::make_shared<vnm::filesystem_observation::Service>();
+    grok::Lifecycle_observer observer(observation_service, {});
     addon::Adapter_runtime runtime(std::move(options));
-    runtime.set_invoke_handler(invoke);
+    runtime.set_invoke_handler([&](auto& context) { invoke(context, observer); });
     return runtime.run();
 }
