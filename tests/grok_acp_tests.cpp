@@ -43,6 +43,33 @@ std::string message_chunk(const std::string& session, const std::string& text)
     return notification("session/update", session, json_util::object({{"sessionUpdate", Json("agent_message_chunk")},
         {"content", json_util::object({{"type", Json("text")}, {"text", Json(text)}})}}));
 }
+std::string spawn_call(const std::string& parent, const std::string& tool, bool background = false)
+{
+    // Native first registers the pending wire call, then refines its rawInput
+    // to the typed Task variant before execution (tool_calls.rs).
+    const auto pending = notification("session/update", parent, json_util::object({
+        {"sessionUpdate", Json("tool_call")}, {"toolCallId", Json(tool)}, {"title", Json("spawn_subagent")},
+        {"kind", Json("other")}, {"status", Json("pending")},
+        {"rawInput", json_util::object({{"prompt", Json("Inspect the requested change.")},
+            {"description", Json("Inspect the requested change.")}, {"run_in_background", Json(background)}})},
+        {"_meta", json_util::object({{"subagentBackground", Json(background)}})}}));
+    return pending + notification("session/update", parent, json_util::object({{"sessionUpdate", Json("tool_call_update")},
+        {"toolCallId", Json(tool)}, {"title", Json("Inspect the requested change.")},
+        {"rawInput", json_util::object({{"variant", Json("Task")}, {"prompt", Json("Inspect the requested change.")},
+            {"description", Json("Inspect the requested change.")}, {"run_in_background", Json(background)}})}}));
+}
+std::string spawn_output(const std::string& parent, const std::string& tool, Json output)
+{
+    return notification("session/update", parent, json_util::object({{"sessionUpdate", Json("tool_call_update")},
+        {"toolCallId", Json(tool)}, {"status", Json("completed")}, {"rawOutput", std::move(output)}}));
+}
+std::string foreground_result(const std::string& parent, const std::string& tool, const std::string& child)
+{
+    return spawn_output(parent, tool, json_util::object({{"type", Json("SubagentCompleted")},
+        {"subagent_id", Json(child)}, {"subagent_type", Json("general-purpose")}, {"output", Json("Child result.")},
+        {"tool_calls", Json(1)}, {"turns", Json(1)}, {"duration_ms", Json(20)}, {"worktree_path", Json()},
+        {"resume_from_hint", Json(child)}}));
+}
 std::string child_permission(const std::string& session, const std::string& tool)
 {
     auto options = Json::array();
@@ -67,24 +94,25 @@ void child_routing(const std::string& prompt_state)
     // can also send it to the spawner. Attempts reuse the child session ID.
     addon::Structured_inspection inspection;
     inspection.protocol_state = prompt_state;
-    inspection.stdout_bytes = child_spawn("root-session", "child-a", "attempt-a1") +
+    inspection.stdout_bytes = spawn_call("root-session", "spawn-a1") +
+        child_spawn("root-session", "child-a", "attempt-a1") +
         message_chunk("child-a", "Child analysis must not become the root answer.");
     auto result = inspect_acp(inspection);
     require(!result.complete && !result.failure_reason && !result.stdin_bytes,
         "a child announced by the native parent was rejected");
     const auto child_state = result.protocol_state;
     inspection.protocol_state = child_state;
-    inspection.stdout_bytes = child_spawn("root-session", "child-b", "attempt-b1") +
+    inspection.stdout_bytes = spawn_call("root-session", "spawn-b1") +
+        child_spawn("root-session", "child-b", "attempt-b1") + spawn_call("child-a", "spawn-a1") +
         child_spawn("child-a", "grandchild", "attempt-g1") +
         message_chunk("root-session", "Root ") + message_chunk("child-b", "Sibling text.") +
         message_chunk("grandchild", "Nested text.") +
         child_finished("child-a", "grandchild", "attempt-g1") +
+        foreground_result("child-a", "spawn-a1", "grandchild") +
         child_finished("root-session", "child-a", "attempt-a1") +
-        child_spawn("root-session", "child-a", "attempt-a2") +
-        child_spawn("root-session", "child-a", "attempt-a2") +
-        message_chunk("child-a", "Second attempt.") +
-        child_finished("root-session", "child-a", "attempt-a2") +
-        child_finished("root-session", "child-b", "attempt-b1") + message_chunk("root-session", "answer.") +
+        foreground_result("root-session", "spawn-a1", "child-a") +
+        child_finished("root-session", "child-b", "attempt-b1") +
+        foreground_result("root-session", "spawn-b1", "child-b") + message_chunk("root-session", "answer.") +
         reply(4, json_util::object({{"stopReason", Json("end_turn")}}));
     result = inspect_acp(inspection);
     require(!result.complete && !result.failure_reason && result.stdin_bytes &&
@@ -96,6 +124,13 @@ void child_routing(const std::string& prompt_state)
     result = inspect_acp(inspection);
     require(result.complete && result.result_bytes == std::optional<std::string>("Root answer."),
         "child output contaminated the root result");
+
+    inspection.protocol_state = child_state;
+    inspection.stdout_bytes = child_finished("root-session", "child-a", "attempt-a1") +
+        child_spawn("root-session", "child-a", "attempt-a2") +
+        child_spawn("root-session", "child-a", "attempt-a2") + message_chunk("child-a", "Second attempt.");
+    result = inspect_acp(inspection);
+    require(!result.complete && !result.failure_reason, "a new native attempt lost the child's existing routing");
 
     auto spawner_announcement = json_util::parse(child_spawn("child-a", "grandchild", "attempt-g1")).value();
     auto params = json_util::member(spawner_announcement, "params");
@@ -144,6 +179,106 @@ void child_routing(const std::string& prompt_state)
     inspection.protocol_state = child_state;
     inspection.stdout_bytes = child_permission("unknown-child", task_tool);
     require(inspect_acp(inspection).failure_reason.has_value(), "an unannounced child gained permission routing");
+}
+void subagent_completion(const std::string& prompt_state)
+{
+    // Oracle: grok-code 2bdd1d6 task/mod.rs returns typed SubagentCompleted only
+    // after a successful blocking spawn. Explicit and automatic backgrounding
+    // return Text instead, possibly before SubagentSpawned. acp_conversion.rs
+    // sends the typed output on the invoking parent's completed tool call.
+    // A terminal lifecycle event, public empty queue, and will_wake=false are
+    // not native barriers for pending synthetic parent prompts.
+    const auto end_turn = message_chunk("root-session", "Root answer.") +
+        reply(4, json_util::object({{"stopReason", Json("end_turn")}}));
+    const auto background_result = json_util::object({{"type", Json("Text")},
+        {"text", Json("Subagent started in the background.")}});
+    const auto empty_queue = std::string(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"_x.ai/queue/changed\","
+        "\"params\":{\"sessionId\":\"root-session\",\"entries\":[]}}\n");
+    for (const auto& unfinished : {
+            spawn_call("root-session", "running") + child_spawn("root-session", "child", "attempt"),
+            spawn_call("root-session", "queued", true) +
+                spawn_output("root-session", "queued", background_result),
+            spawn_call("root-session", "auto-background") + child_spawn("root-session", "child", "attempt") +
+                spawn_output("root-session", "auto-background", background_result) +
+                child_finished("root-session", "child", "attempt") + empty_queue,
+            spawn_call("root-session", "parent") + child_spawn("root-session", "child", "attempt") +
+                spawn_call("child", "nested", true) + child_spawn("child", "grandchild", "nested-attempt") +
+                foreground_result("root-session", "parent", "child")})
+    {
+        addon::Structured_inspection inspection;
+        inspection.protocol_state = prompt_state;
+        inspection.stdout_bytes = unfinished + end_turn;
+        const auto result = inspect_acp(inspection);
+        require(result.complete && !result.result_bytes && !result.stdin_bytes &&
+            result.failure_reason == std::optional<std::string>("acp_subagent_completion_unconfirmed"),
+            "the first root reply closed or reported success with unconfirmed native child work");
+    }
+
+    addon::Structured_inspection inspection;
+    inspection.protocol_state = prompt_state;
+    inspection.stdout_bytes = spawn_call("root-session", "foreground") +
+        child_spawn("root-session", "child", "attempt") + child_spawn("root-session", "child", "attempt") +
+        foreground_result("root-session", "foreground", "child") + end_turn;
+    auto result = inspect_acp(inspection);
+    require(!result.complete && !result.failure_reason && result.stdin_bytes &&
+        result.stdin_bytes->find("session/close") != std::string::npos,
+        "a consumed foreground result required the later asynchronous finish publication");
+    inspection.protocol_state = result.protocol_state;
+    inspection.stdout_bytes = child_finished("root-session", "child", "attempt") +
+        reply(5, json_util::object({{"_meta", json_util::object({{"x.ai/closeOutcome", Json("closed")}})}}));
+    result = inspect_acp(inspection);
+    require(result.complete && result.result_bytes == std::optional<std::string>("Root answer."),
+        "late foreground lifecycle publication lost a confirmed root result");
+
+    inspection.protocol_state = prompt_state;
+    inspection.stdout_bytes = spawn_call("root-session", "foreground") +
+        child_spawn("root-session", "child", "attempt-1") +
+        foreground_result("root-session", "foreground", "child") +
+        child_spawn("root-session", "child", "attempt-2") +
+        foreground_result("root-session", "foreground", "child") + end_turn;
+    result = inspect_acp(inspection);
+    require(result.failure_reason == std::optional<std::string>("acp_subagent_completion_unconfirmed") &&
+        !result.stdin_bytes, "an old tool result settled a new child attempt");
+
+    inspection.protocol_state = prompt_state;
+    inspection.stdout_bytes = spawn_call("root-session", "reused-call") +
+        child_spawn("root-session", "child", "attempt") +
+        foreground_result("root-session", "reused-call", "child") +
+        spawn_call("root-session", "reused-call", true) +
+        spawn_output("root-session", "reused-call", background_result) + end_turn;
+    result = inspect_acp(inspection);
+    require(result.failure_reason == std::optional<std::string>("acp_subagent_completion_unconfirmed") &&
+        !result.stdin_bytes, "a newly registered native call reused an earlier completion");
+
+    for (const auto& unrelated_completion : {
+            child_spawn("root-session", "child", "attempt") +
+                foreground_result("root-session", "unseen-call", "child"),
+            spawn_call("root-session", "root-call") + child_spawn("root-session", "child", "attempt") +
+                child_spawn("child", "grandchild", "nested-attempt") +
+                foreground_result("root-session", "root-call", "grandchild")})
+    {
+        inspection.protocol_state = prompt_state;
+        inspection.stdout_bytes = unrelated_completion + end_turn;
+        require(inspect_acp(inspection).failure_reason.has_value(),
+            "a tool completion without matching invocation and parentage proved finality");
+    }
+    for (const char* type : {"SendSubagentMessage", "Workflow", "UpdateGoal"}) {
+        inspection.protocol_state = prompt_state;
+        inspection.stdout_bytes = spawn_output("root-session", "orchestration", json_util::object({
+            {"type", Json(type)}})) + end_turn;
+        result = inspect_acp(inspection);
+        require(result.failure_reason == std::optional<std::string>("acp_subagent_completion_unconfirmed") &&
+            !result.stdin_bytes, "native orchestration without a completion barrier reported success");
+    }
+    inspection.protocol_state = prompt_state;
+    inspection.stdout_bytes = notification("session/update", "root-session", json_util::object({
+        {"sessionUpdate", Json("tool_call_update")}, {"toolCallId", Json("mcp-task")}, {"title", Json("Task")},
+        {"rawInput", json_util::object({{"variant", Json("UseTool")}, {"tool_name", Json("external__task")}})}})) +
+        end_turn;
+    result = inspect_acp(inspection);
+    require(!result.complete && !result.failure_reason && result.stdin_bytes,
+        "an unrelated tool's display name was treated as native subagent work");
 }
 void utf8_read_boundaries(const std::string& initial)
 {
@@ -390,6 +525,7 @@ int main()
         result = inspect_acp(inspection);
         require(result.stdin_bytes && result.stdin_bytes->find("session/prompt") != std::string::npos, "admitted control did not release prompt");
         const auto prompt_state = result.protocol_state;
+        subagent_completion(prompt_state);
         child_routing(prompt_state);
         // Oracle: the owner's rule that a delegated run keeps its launcher's
         // posture and the package approves only its own Task tools

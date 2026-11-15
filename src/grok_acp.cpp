@@ -36,7 +36,9 @@ bool enroll_child(Json& state, const Json& params)
     const auto& update = json_util::member(params, "update");
     const auto& parent = json_util::member(update, "parent_session_id");
     const auto& child = json_util::member(update, "child_session_id");
+    const auto& attempt = json_util::member(update, "attempt_id");
     if (!json_util::bounded_string(parent, 512) || !json_util::bounded_string(child, 512) ||
+        (update.find("attempt_id") && !json_util::bounded_string(attempt, 512)) ||
         json_util::member(update, "subagent_id") != child || parent == child ||
         child == json_util::member(state, "session") || !enrolled_session(state, parent.as_string()) ||
         !enrolled_session(state, json_util::text(params, "sessionId")))
@@ -44,14 +46,106 @@ bool enroll_child(Json& state, const Json& params)
         return false;
     }
     auto children = json_util::member(state, "children");
-    if (const auto* previous_parent = children.find(child.as_string())) {
-        return *previous_parent == parent;
+    if (const auto* previous = children.find(child.as_string())) {
+        if (json_util::member(*previous, "parent") != parent) {
+            return false;
+        }
+        if (attempt.is_string() && json_util::member(*previous, "attempt") == attempt) {
+            return true;
+        }
+        // A wake is a new attempt on the same session. Its parent continuation
+        // has no native close barrier, and an older tool result cannot settle
+        // it. Repeated announcements without attempt IDs are also ambiguous.
+        state.set("unconfirmed_subagent_work", Json(true));
     }
     // Native SubagentSpawned precedes child Prompt dispatch. Its envelope can
     // name the spawner instead of the actual parent. Keep ancestry across
     // finished attempts: a wake reuses this child session and its routing.
-    children.set(child.as_string(), parent);
+    children.set(child.as_string(), json_util::object({{"parent", parent}, {"attempt", attempt},
+        {"foreground_complete", Json(false)}}));
     state.set("children", std::move(children));
+    return true;
+}
+bool record_subagent_tool(Json& state, const std::string& session, const Json& update)
+{
+    const auto kind = json_util::text(update, "sessionUpdate");
+    if (kind != "tool_call" && kind != "tool_call_update") {
+        return true;
+    }
+    const auto input_type = json_util::text(json_util::member(update, "rawInput"), "variant");
+    const auto& output = json_util::member(update, "rawOutput");
+    const auto output_type = json_util::text(output, "type");
+    for (const char* orchestration : {"SendSubagentMessage", "Workflow", "UpdateGoal"}) {
+        if (input_type == orchestration || output_type == orchestration) {
+            state.set("unconfirmed_subagent_work", Json(true));
+        }
+    }
+    // The native pending Task call has subagentBackground metadata; its
+    // refined input has variant=Task. Neither declared background=false nor a
+    // completed Text result proves foreground completion: Task can fall back
+    // to background execution before the child is even announced.
+    const bool task = input_type == "Task" ||
+        json_util::member(json_util::member(update, "_meta"), "subagentBackground").is_boolean();
+    const bool completed = output_type == "SubagentCompleted";
+    if (!task && !completed) {
+        return true;
+    }
+    const auto& call_id = json_util::member(update, "toolCallId");
+    if (!json_util::bounded_string(call_id, 512)) {
+        return false;
+    }
+    auto all_calls = json_util::member(state, "spawn_calls");
+    auto calls = json_util::member(all_calls, session);
+    if (!calls.is_object()) {
+        calls = Json::object();
+    }
+    if (task && (kind == "tool_call" || !calls.find(call_id.as_string()))) {
+        calls.set(call_id.as_string(), Json());
+    }
+    if (completed) {
+        const auto* invocation = calls.find(call_id.as_string());
+        auto children = json_util::member(state, "children");
+        const auto& child_id = json_util::member(output, "subagent_id");
+        if (!invocation || json_util::text(update, "status") != "completed" ||
+            !json_util::bounded_string(child_id, 512))
+        {
+            return false;
+        }
+        const auto* child = children.find(child_id.as_string());
+        if (!child || json_util::text(*child, "parent") != session) {
+            return false;
+        }
+        if (invocation->is_object()) {
+            return json_util::member(*invocation, "child") == child_id;
+        }
+        calls.set(call_id.as_string(), json_util::object({{"child", child_id},
+            {"attempt", json_util::member(*child, "attempt")}}));
+        auto finished = *child;
+        finished.set("foreground_complete", Json(true));
+        children.set(child_id.as_string(), std::move(finished));
+        state.set("children", std::move(children));
+    }
+    all_calls.set(session, std::move(calls));
+    state.set("spawn_calls", std::move(all_calls));
+    return true;
+}
+bool subagents_complete(const Json& state)
+{
+    if (json_util::member(state, "unconfirmed_subagent_work") == Json(true)) {
+        return false;
+    }
+    for (const auto& child : json_util::member(state, "children").as_object()) {
+        if (json_util::member(child.value, "foreground_complete") != Json(true)) {
+            return false;
+        }
+    }
+    for (const auto& session : json_util::member(state, "spawn_calls").as_object()) {
+        for (const auto& call : session.value.as_object()) {
+            if (!call.value.is_object()) {
+                return false;
+            }
+        }
+    }
     return true;
 }
 // A request whose `toolCall` invokes one of the task's own Task tools: Grok
@@ -142,6 +236,7 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
     }
     return addon::serialize_json(json_util::object({{"stage", Json(1)}, {"pending_base64", Json("")},
         {"prompt", Json(request.prompt)}, {"session", Json("")}, {"output", Json("")}, {"children", Json::object()},
+        {"spawn_calls", Json::object()}, {"unconfirmed_subagent_work", Json(false)},
         {"new", json_util::object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}})},
         {"servers", std::move(expected)}, {"catalog_dirty", Json(false)},
         {"catalog_admitted", Json(false)}, {"catalog_id", Json(3)}, {"rejected", Json(false)}}));
@@ -150,10 +245,11 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
 {
     auto state = addon::parse_exchange_protocol_state(inspection.protocol_state);
     if (!state || !json_util::exact_keys(*state, {"stage", "pending_base64", "prompt", "session", "output", "children", "new", "servers",
-            "catalog_dirty", "catalog_admitted", "catalog_id", "rejected"}) ||
+            "spawn_calls", "unconfirmed_subagent_work", "catalog_dirty", "catalog_admitted", "catalog_id", "rejected"}) ||
         !json_util::member(*state, "stage").is_integer() || !json_util::member(*state, "catalog_dirty").is_boolean() || !json_util::member(*state, "servers").is_array() ||
         !json_util::member(*state, "new").is_object() || !json_util::member(*state, "rejected").is_boolean() ||
-        !json_util::member(*state, "children").is_object()) return failure("malformed_acp_state");
+        !json_util::member(*state, "children").is_object() || !json_util::member(*state, "spawn_calls").is_object() ||
+        !json_util::member(*state, "unconfirmed_subagent_work").is_boolean()) return failure("malformed_acp_state");
     for (const auto key : {"pending_base64", "prompt", "session", "output"})
         if (!json_util::member(*state, key).is_string()) return failure("malformed_acp_state");
     if (!json_util::member(*state, "catalog_admitted").is_boolean() ||
@@ -199,6 +295,9 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                     return failure("acp_session_mismatch");
                 }
                 const auto& update = json_util::member(params, "update");
+                if (!record_subagent_tool(*state, source_session, update)) {
+                    return failure("invalid_acp_subagent_completion");
+                }
                 if (json_util::text(update, "sessionUpdate") == "agent_message_chunk" && source_session == session) {
                     if (stage != 4 || json_util::text(json_util::member(update, "content"), "type") != "text") return failure("unexpected_acp_text");
                     const auto& text = json_util::member(json_util::member(update, "content"), "text");
@@ -215,6 +314,18 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             {
                 if (stage != 4 || !enroll_child(*state, json_util::member(*value, "params"))) {
                     return failure("invalid_acp_child_lineage");
+                }
+            }
+            else
+            if (method == "_x.ai/session_notification" &&
+                json_util::text(json_util::member(json_util::member(*value, "params"), "update"),
+                    "sessionUpdate") == "subagent_finished")
+            {
+                const auto& params = json_util::member(*value, "params");
+                if (enrolled_session(*state, json_util::text(params, "sessionId")) &&
+                    json_util::member(json_util::member(params, "update"), "will_wake") == Json(true))
+                {
+                    state->set("unconfirmed_subagent_work", Json(true));
                 }
             }
             else if (!method.starts_with("_x.ai/")) return failure("unsupported_acp_notification");
@@ -263,6 +374,9 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                 return failure("tool_permission_denied");
             }
             if (json_util::text(result, "stopReason") != "end_turn" || output.empty()) return failure("acp_completion_failed");
+            if (!subagents_complete(*state)) {
+                return failure("acp_subagent_completion_unconfirmed");
+            }
             input = rpc(5, "session/close", json_util::object({{"sessionId", json_util::member(*state, "session")}}));
             stage = 5;
         }
@@ -270,6 +384,9 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             const auto outcome = json_util::text(json_util::member(result, "_meta"), "x.ai/closeOutcome");
             if (outcome != "closed" || offset != pending.size() ||
                 (inspection.final && (inspection.timed_out || inspection.exit_code != 0))) return failure("acp_close_unconfirmed");
+            if (!subagents_complete(*state)) {
+                return failure("acp_subagent_completion_unconfirmed");
+            }
             addon::Structured_inspect_result completed;
             completed.complete = true;
             completed.result_bytes = std::move(output);
