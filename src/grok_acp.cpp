@@ -26,6 +26,34 @@ bool response(const Json& value, int id)
     return json_util::text(value, "jsonrpc") == "2.0" && json_util::member(value, "id").is_integer() &&
         json_util::member(value, "id").as_integer() == id && json_util::member(value, "result").is_object() && !value.find("error");
 }
+bool enrolled_session(const Json& state, const std::string& session)
+{
+    return !session.empty() && (session == json_util::text(state, "session") ||
+        json_util::member(state, "children").find(session));
+}
+bool enroll_child(Json& state, const Json& params)
+{
+    const auto& update = json_util::member(params, "update");
+    const auto& parent = json_util::member(update, "parent_session_id");
+    const auto& child = json_util::member(update, "child_session_id");
+    if (!json_util::bounded_string(parent, 512) || !json_util::bounded_string(child, 512) ||
+        json_util::member(update, "subagent_id") != child || parent == child ||
+        child == json_util::member(state, "session") || !enrolled_session(state, parent.as_string()) ||
+        !enrolled_session(state, json_util::text(params, "sessionId")))
+    {
+        return false;
+    }
+    auto children = json_util::member(state, "children");
+    if (const auto* previous_parent = children.find(child.as_string())) {
+        return *previous_parent == parent;
+    }
+    // Native SubagentSpawned precedes child Prompt dispatch. Its envelope can
+    // name the spawner instead of the actual parent. Keep ancestry across
+    // finished attempts: a wake reuses this child session and its routing.
+    children.set(child.as_string(), parent);
+    state.set("children", std::move(children));
+    return true;
+}
 // A request whose `toolCall` invokes one of the task's own Task tools: Grok
 // asks with rawInput {variant: "UseTool", tool_name: "<server>__<action>"}
 // and the same title.
@@ -49,7 +77,7 @@ std::string permission_reply(const Json& request, const Json& state, bool* rejec
 {
     const auto& params  = json_util::member(request, "params");
     const auto& options = json_util::member(params, "options");
-    if (json_util::text(params, "sessionId") != json_util::text(state, "session") || !json_util::member(params, "toolCall").is_object() ||
+    if (!enrolled_session(state, json_util::text(params, "sessionId")) || !json_util::member(params, "toolCall").is_object() ||
         !options.is_array()) return {};
     const bool allowed = task_tool_request(json_util::member(params, "toolCall"), json_util::member(state, "servers"));
     const char* option = allowed ? "allow-once" : "reject-once";
@@ -57,7 +85,7 @@ std::string permission_reply(const Json& request, const Json& state, bool* rejec
             return json_util::text(offered, "optionId") == option &&
                 json_util::text(offered, "kind") == (allowed ? "allow_once" : "reject_once");
         })) return {};
-    *rejected = !allowed;
+    *rejected = !allowed && json_util::text(params, "sessionId") == json_util::text(state, "session");
     return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", json_util::member(request, "id")},
         {"result", json_util::object({{"outcome", json_util::object({{"outcome", Json("selected")}, {"optionId", Json(option)}})}})}})) + '\n';
 }
@@ -113,7 +141,7 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
         expected.push_back(json_util::object({{"name", Json(name)}, {"actions", std::move(actions)}}));
     }
     return addon::serialize_json(json_util::object({{"stage", Json(1)}, {"pending_base64", Json("")},
-        {"prompt", Json(request.prompt)}, {"session", Json("")}, {"output", Json("")},
+        {"prompt", Json(request.prompt)}, {"session", Json("")}, {"output", Json("")}, {"children", Json::object()},
         {"new", json_util::object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}})},
         {"servers", std::move(expected)}, {"catalog_dirty", Json(false)},
         {"catalog_admitted", Json(false)}, {"catalog_id", Json(3)}, {"rejected", Json(false)}}));
@@ -121,10 +149,11 @@ std::string acp_initial_state(const addon::Delegated_prepare_request& request)
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     auto state = addon::parse_exchange_protocol_state(inspection.protocol_state);
-    if (!state || !json_util::exact_keys(*state, {"stage", "pending_base64", "prompt", "session", "output", "new", "servers",
+    if (!state || !json_util::exact_keys(*state, {"stage", "pending_base64", "prompt", "session", "output", "children", "new", "servers",
             "catalog_dirty", "catalog_admitted", "catalog_id", "rejected"}) ||
         !json_util::member(*state, "stage").is_integer() || !json_util::member(*state, "catalog_dirty").is_boolean() || !json_util::member(*state, "servers").is_array() ||
-        !json_util::member(*state, "new").is_object() || !json_util::member(*state, "rejected").is_boolean()) return failure("malformed_acp_state");
+        !json_util::member(*state, "new").is_object() || !json_util::member(*state, "rejected").is_boolean() ||
+        !json_util::member(*state, "children").is_object()) return failure("malformed_acp_state");
     for (const auto key : {"pending_base64", "prompt", "session", "output"})
         if (!json_util::member(*state, key).is_string()) return failure("malformed_acp_state");
     if (!json_util::member(*state, "catalog_admitted").is_boolean() ||
@@ -165,15 +194,27 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             if (method == "session/update") {
                 const auto& params = json_util::member(*value, "params");
                 const auto session = json_util::text(*state, "session");
-                if (!session.empty() && json_util::text(params, "sessionId") != session) return failure("acp_session_mismatch");
+                const auto source_session = json_util::text(params, "sessionId");
+                if (!session.empty() && !enrolled_session(*state, source_session)) {
+                    return failure("acp_session_mismatch");
+                }
                 const auto& update = json_util::member(params, "update");
-                if (json_util::text(update, "sessionUpdate") == "agent_message_chunk") {
+                if (json_util::text(update, "sessionUpdate") == "agent_message_chunk" && source_session == session) {
                     if (stage != 4 || json_util::text(json_util::member(update, "content"), "type") != "text") return failure("unexpected_acp_text");
                     const auto& text = json_util::member(json_util::member(update, "content"), "text");
                     if (text.is_string()) {
                         output += text.as_string();
                     }
                     if (output.size() > k_result_limit) return failure("acp_result_limit");
+                }
+            }
+            else
+            if (method == "_x.ai/session_notification" &&
+                json_util::text(json_util::member(json_util::member(*value, "params"), "update"),
+                    "sessionUpdate") == "subagent_spawned")
+            {
+                if (stage != 4 || !enroll_child(*state, json_util::member(*value, "params"))) {
+                    return failure("invalid_acp_child_lineage");
                 }
             }
             else if (!method.starts_with("_x.ai/")) return failure("unsupported_acp_notification");

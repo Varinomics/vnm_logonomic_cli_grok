@@ -19,6 +19,132 @@ Json catalog(Json servers)
     return json_util::object({{"result", json_util::object({{"servers", std::move(servers)}, {"sessionMcpResolved", Json(false)}})}});
 }
 namespace {
+std::string notification(const char* method, const std::string& session, Json update)
+{
+    return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"method", Json(method)},
+        {"params", json_util::object({{"sessionId", Json(session)}, {"update", std::move(update)}})}})) + '\n';
+}
+std::string child_spawn(const std::string& parent, const std::string& child, const std::string& attempt)
+{
+    return notification("_x.ai/session_notification", parent, json_util::object({
+        {"sessionUpdate", Json("subagent_spawned")}, {"subagent_id", Json(child)}, {"attempt_id", Json(attempt)},
+        {"parent_session_id", Json(parent)}, {"child_session_id", Json(child)},
+        {"subagent_type", Json("general-purpose")}, {"description", Json("Inspect the requested change.")}}));
+}
+std::string child_finished(const std::string& parent, const std::string& child, const std::string& attempt)
+{
+    return notification("_x.ai/session_notification", parent, json_util::object({
+        {"sessionUpdate", Json("subagent_finished")}, {"subagent_id", Json(child)}, {"attempt_id", Json(attempt)},
+        {"child_session_id", Json(child)}, {"status", Json("completed")}, {"tool_calls", Json(1)},
+        {"turns", Json(1)}, {"duration_ms", Json(20)}, {"tokens_used", Json(30)}, {"will_wake", Json(false)}}));
+}
+std::string message_chunk(const std::string& session, const std::string& text)
+{
+    return notification("session/update", session, json_util::object({{"sessionUpdate", Json("agent_message_chunk")},
+        {"content", json_util::object({{"type", Json("text")}, {"text", Json(text)}})}}));
+}
+std::string child_permission(const std::string& session, const std::string& tool)
+{
+    auto options = Json::array();
+    options.push_back(json_util::object({{"optionId", Json("allow-once")}, {"name", Json("allow once")},
+        {"kind", Json("allow_once")}}));
+    options.push_back(json_util::object({{"optionId", Json("always-allow")}, {"name", Json("always allow")},
+        {"kind", Json("allow_always")}}));
+    options.push_back(json_util::object({{"optionId", Json("reject-once")}, {"name", Json("reject once")},
+        {"kind", Json("reject_once")}}));
+    return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json("child-permission")},
+        {"method", Json("session/request_permission")}, {"params", json_util::object({
+            {"sessionId", Json(session)}, {"toolCall", json_util::object({{"toolCallId", Json("child-tool")},
+                {"kind", Json("other")}, {"title", Json(tool)}, {"rawInput", json_util::object({
+                    {"variant", Json("UseTool")}, {"tool_name", Json(tool)}, {"tool_input", Json::object()}})}})},
+            {"options", std::move(options)}})}})) + '\n';
+}
+void child_routing(const std::string& prompt_state)
+{
+    // Oracle: xai-org/grok-code 2bdd1d6, extensions/notification.rs declares
+    // snake_case SubagentSpawned fields and publishes the parent announcement
+    // before child Prompt dispatch. agent/subagent/start_artifact_publication.rs
+    // can also send it to the spawner. Attempts reuse the child session ID.
+    addon::Structured_inspection inspection;
+    inspection.protocol_state = prompt_state;
+    inspection.stdout_bytes = child_spawn("root-session", "child-a", "attempt-a1") +
+        message_chunk("child-a", "Child analysis must not become the root answer.");
+    auto result = inspect_acp(inspection);
+    require(!result.complete && !result.failure_reason && !result.stdin_bytes,
+        "a child announced by the native parent was rejected");
+    const auto child_state = result.protocol_state;
+    inspection.protocol_state = child_state;
+    inspection.stdout_bytes = child_spawn("root-session", "child-b", "attempt-b1") +
+        child_spawn("child-a", "grandchild", "attempt-g1") +
+        message_chunk("root-session", "Root ") + message_chunk("child-b", "Sibling text.") +
+        message_chunk("grandchild", "Nested text.") +
+        child_finished("child-a", "grandchild", "attempt-g1") +
+        child_finished("root-session", "child-a", "attempt-a1") +
+        child_spawn("root-session", "child-a", "attempt-a2") +
+        child_spawn("root-session", "child-a", "attempt-a2") +
+        message_chunk("child-a", "Second attempt.") +
+        child_finished("root-session", "child-a", "attempt-a2") +
+        child_finished("root-session", "child-b", "attempt-b1") + message_chunk("root-session", "answer.") +
+        reply(4, json_util::object({{"stopReason", Json("end_turn")}}));
+    result = inspect_acp(inspection);
+    require(!result.complete && !result.failure_reason && result.stdin_bytes &&
+        result.stdin_bytes->find("session/close") != std::string::npos,
+        "completed descendant attempts prevented the root from finishing");
+    inspection.protocol_state = result.protocol_state;
+    inspection.stdout_bytes = reply(5, json_util::object({
+        {"_meta", json_util::object({{"x.ai/closeOutcome", Json("closed")}})}}));
+    result = inspect_acp(inspection);
+    require(result.complete && result.result_bytes == std::optional<std::string>("Root answer."),
+        "child output contaminated the root result");
+
+    auto spawner_announcement = json_util::parse(child_spawn("child-a", "grandchild", "attempt-g1")).value();
+    auto params = json_util::member(spawner_announcement, "params");
+    params.set("sessionId", Json("root-session"));
+    spawner_announcement.set("params", std::move(params));
+    inspection.protocol_state = child_state;
+    inspection.stdout_bytes = addon::serialize_json(spawner_announcement) + '\n' + message_chunk("grandchild", "Routed.");
+    result = inspect_acp(inspection);
+    require(!result.complete && !result.failure_reason,
+        "a native announcement copied to the enrolled spawner lost its actual parent");
+
+    for (const auto& invalid : {
+            child_spawn("foreign-parent", "unknown-child", "attempt"),
+            child_spawn("child-a", "root-session", "attempt"),
+            child_spawn("child-a", "child-a", "attempt"),
+            child_spawn("child-a", "child-b", "attempt") + child_spawn("root-session", "child-b", "attempt"),
+            message_chunk("unknown-child", "Unannounced.")})
+    {
+        inspection.protocol_state = child_state;
+        inspection.stdout_bytes = invalid;
+        require(inspect_acp(inspection).failure_reason.has_value(),
+            "unannounced or conflicting child lineage was accepted");
+    }
+    const std::string task_tool = "logonomic-task-1-control__complete";
+    for (const auto& [tool, option] : {
+            std::pair<std::string, std::string>{task_tool, "allow-once"},
+            {"github__create_issue", "reject-once"}, {"logonomic-task-2-control__complete", "reject-once"}})
+    {
+        inspection.protocol_state = child_state;
+        inspection.stdout_bytes = child_permission("child-a", tool);
+        result = inspect_acp(inspection);
+        require(!result.complete && !result.failure_reason && result.stdin_bytes,
+            "an enrolled child's permission request was not answered");
+        const auto answer = json_util::parse(*result.stdin_bytes);
+        require(answer && json_util::member(*answer, "id") == Json("child-permission") &&
+            json_util::text(json_util::member(json_util::member(*answer, "result"), "outcome"), "optionId") == option,
+            "child permissions changed the launcher's one-time task tool policy or request identity");
+        if (option == "reject-once") {
+            inspection.protocol_state = result.protocol_state;
+            inspection.stdout_bytes = reply(4, json_util::object({{"stopReason", Json("cancelled")},
+                {"_meta", json_util::object({{"cancellationCategory", Json("PermissionRejected")}})}}));
+            require(inspect_acp(inspection).failure_reason == std::optional<std::string>("acp_completion_failed"),
+                "a child's denial was attributed to the root turn");
+        }
+    }
+    inspection.protocol_state = child_state;
+    inspection.stdout_bytes = child_permission("unknown-child", task_tool);
+    require(inspect_acp(inspection).failure_reason.has_value(), "an unannounced child gained permission routing");
+}
 void utf8_read_boundaries(const std::string& initial)
 {
     // JSON records are UTF-8, but native stdout reads can stop at any byte.
@@ -264,6 +390,7 @@ int main()
         result = inspect_acp(inspection);
         require(result.stdin_bytes && result.stdin_bytes->find("session/prompt") != std::string::npos, "admitted control did not release prompt");
         const auto prompt_state = result.protocol_state;
+        child_routing(prompt_state);
         // Oracle: the owner's rule that a delegated run keeps its launcher's
         // posture and the package approves only its own Task tools
         // (2026-09-28), and grok 1.0.41's permission request as recorded by the
