@@ -107,8 +107,17 @@ that bound further wake is unavailable until a new managed launch.
 Structured implementation and delegated tasks use the native ACP stdio agent.
 Delegation supplies the host's task-control MCP servers, verifies their native
 session catalog reports ready and exposes every required action, then submits the
-prompt. Native end-turn and an acknowledged session close are required for a
-result. Model selection has no version ceiling.
+prompt. Native parent announcements enroll descendant sessions for updates and
+permission routing; child text stays separate from the root answer. A successful
+result requires a nonempty root answer, native root `end_turn`, matching native
+`SubagentCompleted` tool results for every Task invocation and enrolled descendant,
+and an acknowledged session close. Model selection has no version ceiling.
+
+After an otherwise valid root reply, background launches, automatic backgrounding,
+unresolved descendants, same-session wakes and native orchestration without a
+supported completion barrier fail with `acp_subagent_completion_unconfirmed`.
+A native `subagent_finished` notification or an empty public queue is not a
+completion barrier.
 
 `delegated-model-selection@1` accepts per-task model and reasoning-effort
 selection through `grok agent --model` and `--reasoning-effort`. Each requested
@@ -120,13 +129,18 @@ launcher's `--model`, `--reasoning-effort` and `--always-approve` options carry
 over to `grok agent`; the interactive CLI's other options, among them
 `--permission-mode`, `--allow` and `--deny`, have no agent-mode equivalent and
 are refused with `delegated_launcher_options_unavailable`, naming the option. When
-Grok asks for a tool's permission, the package answers with the request's own
-`allow-once` option only for the task's own Task tools
+Grok asks for a tool's permission in the root or an enrolled descendant, the package
+answers with the request's own `allow-once` option only for the task's own Task tools
 (`logonomic-<task>-<server>__<action>`) and with `reject-once` for anything else,
 which nobody can approve in a headless run; it never chooses `always-allow`.
-Grok ends a turn at a rejected tool, and the task fails with
-`tool_permission_denied`. A task that edits files or runs commands therefore
-needs a launcher that approves them, such as one passing `--always-approve`.
+The package reports `tool_permission_denied` only when it rejected a root session
+permission request and Grok then cancels that root turn with the native
+`PermissionRejected` category. A child's rejection does not by itself classify
+the root outcome as a permission denial. For other root outcomes, a stop reason
+other than `end_turn` or an empty root answer yields `acp_completion_failed`.
+Native subagent spawning, file edits and commands
+need the launcher's own approval, such as a launcher already passing
+`--always-approve`.
 
 Usage reads `sessions/<cwd>/<session>/usage.json` with its `summary.json`.
 Persisted turns already contain deltas, including folded subagent spend. The
