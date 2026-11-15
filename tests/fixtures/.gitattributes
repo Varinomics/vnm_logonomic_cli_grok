@@ -1,2 +1,4 @@
 grok_legacy_hooks_windows.json -text
 grok_legacy_hooks_posix.json -text
+grok_previous_hooks_windows.json -text
+grok_previous_hooks_posix.json -text
