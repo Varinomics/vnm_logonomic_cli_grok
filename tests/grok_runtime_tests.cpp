@@ -513,6 +513,9 @@ void managed_configuration_contract()
 }
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "--print-hook-configuration") {
+        std::cout << grok::hook_configuration(); return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--help") {
         std::cout << "Grok Build --session-id --resume\n"; return 0;
     }

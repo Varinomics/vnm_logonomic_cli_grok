@@ -629,7 +629,7 @@ std::string session_bridge_path()
     const DWORD count = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
     if (!count || count >= executable.size()) return {};
     executable.resize(count);
-    return utf8((std::filesystem::path(executable).parent_path().parent_path() / "helpers" / "grok_session_bridge.exe").wstring());
+    return utf8((std::filesystem::path(executable).parent_path() / "grok_session_bridge.exe").wstring());
 }
 } // namespace grok
 #endif

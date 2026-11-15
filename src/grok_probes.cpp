@@ -92,9 +92,9 @@ void handle_probes(addon::Invocation_context& context)
             const auto selected = selected_profile(request->context, context);
             if (!selected) return;
 #if defined(_WIN32)
-            result.process.executable = "helpers/grok_quota_bridge.exe";
+            result.process.executable = "adapter/grok_quota_bridge.exe";
 #else
-            result.process.executable = "helpers/grok_quota_bridge";
+            result.process.executable = "adapter/grok_quota_bridge";
 #endif
             assign_environment(&result.process.environment, "GROK_HOME", selected->profile_path, windows);
         }
@@ -106,9 +106,9 @@ void handle_probes(addon::Invocation_context& context)
                 environment.effective_environment, request->context.working_directory);
             if (!argv) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable"); return; }
 #if defined(_WIN32)
-            result.process.executable = "helpers/grok_launch_bridge.exe";
+            result.process.executable = "adapter/grok_launch_bridge.exe";
 #else
-            result.process.executable = "helpers/grok_launch_bridge";
+            result.process.executable = "adapter/grok_launch_bridge";
 #endif
             result.process.argv = *argv;
             const bool windows = environment.platform_id.starts_with("windows-");

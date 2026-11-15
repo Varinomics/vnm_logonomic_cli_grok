@@ -482,9 +482,9 @@ void prepare_delegated(addon::Invocation_context& context)
     if (!argv) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable"); return; }
     addon::Delegated_prepare_result result;
 #ifdef _WIN32
-    result.process.executable = "helpers/grok_launch_bridge.exe";
+    result.process.executable = "adapter/grok_launch_bridge.exe";
 #else
-    result.process.executable = "helpers/grok_launch_bridge";
+    result.process.executable = "adapter/grok_launch_bridge";
 #endif
     result.process.argv = *argv;
     result.model_selection = request->model_selection;
@@ -552,9 +552,9 @@ void prepare_resume(addon::Invocation_context& context)
     if (!argv) { context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable"); return; }
     addon::Resume_prepare_result result;
 #ifdef _WIN32
-    result.process.executable = "helpers/grok_launch_bridge.exe";
+    result.process.executable = "adapter/grok_launch_bridge.exe";
 #else
-    result.process.executable = "helpers/grok_launch_bridge";
+    result.process.executable = "adapter/grok_launch_bridge";
 #endif
     result.process.argv = *argv;
     result.process.stdin_behavior = addon::Stdin_behavior::INHERIT;
@@ -578,9 +578,9 @@ void prepare_resume(addon::Invocation_context& context)
         if (launch.session_wake && launch.session_wake->available) {
             result.patch.set = std::move(launch.set);
 #ifdef _WIN32
-            result.process.executable = "helpers/grok_session_bridge.exe";
+            result.process.executable = "adapter/grok_session_bridge.exe";
 #else
-            result.process.executable = "helpers/grok_session_bridge";
+            result.process.executable = "adapter/grok_session_bridge";
 #endif
             result.process.argv.assign(launch.argv->begin() + 1, launch.argv->end());
         }

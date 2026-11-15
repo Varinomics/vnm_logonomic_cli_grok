@@ -132,11 +132,11 @@ void quota_is_read_by_the_packaged_helper()
 #if defined(_WIN32)
     const std::string platform = "windows-x86_64";
     const std::string profile  = "C:/Users/Jane Doe/.grok-work";
-    const std::string helper   = "helpers/grok_quota_bridge.exe";
+    const std::string helper   = "adapter/grok_quota_bridge.exe";
 #else
     const std::string platform = "linux-x86_64";
     const std::string profile  = "/home/jane/.grok-work";
-    const std::string helper   = "helpers/grok_quota_bridge";
+    const std::string helper   = "adapter/grok_quota_bridge";
 #endif
     addon::Probe_prepare_request prepare;
     prepare.context.launcher.script_body = "grok";

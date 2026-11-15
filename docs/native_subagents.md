@@ -1,17 +1,20 @@
 # Native subagent observation
 
 Interactive Grok launches expose native child activity through `lifecycle-events@2`
-continuous observation. The package uses the maintained framework filesystem
-service and the launch's authenticated file hooks. Observation does not attach a
+continuous observation. The package uses the SDK's shared filesystem lifecycle
+driver, the maintained framework filesystem service and the launch's authenticated
+file hooks. Observation does not attach a
 new ACP client or drive the native TUI.
 
 ## Native evidence and ownership
 
 The host reserves `lifecycle-correlation-lifetime@1` before classifying the root's
 `SessionStart`. That authenticated event binds the native root session ID, host
-transition nonce and exact `transcriptPath`. The transcript must identify the
-native `<session-id>/updates.jsonl` path. Disabling native recording leaves root
-file-hook behavior available but cannot provide journal-backed child completion.
+transition nonce. An optional `transcriptPath` can establish the exact native
+`<session-id>/updates.jsonl` source. A missing, malformed or unreadable optional
+path does not reject root admission. A later valid parent hook can establish a
+readable journal frontier. Disabling native recording leaves root file-hook
+behavior available but cannot provide journal-backed child completion.
 
 `SubagentStart` runs in the parent actor and supplies the parent session ID,
 parent transcript and child ID/type. Grok awaits the hook before appending its
@@ -34,7 +37,7 @@ outer `params.sessionId` and `params.update`. The child fields remain snake_case
 Each attempt receives a stable host agent ID scoped to the root transition nonce.
 A resumed native child with a new `attempt_id` opens a separate interval. A
 duplicate or stale finished row cannot stop a later attempt. Records without a
-usable native attempt identity fail observation; the adapter does not guess a
+usable native attempt identity supply no child fact; the adapter does not guess a
 replacement from timestamps, prompt text or the child's reusable session ID.
 
 A nested parent's hook can precede the outer parent's journal append. Its exact
@@ -55,9 +58,11 @@ session-wide provider sequence.
 The persistent adapter queues paired child observations. `poll_observations`
 returns at most sixteen facts per page with replayable event IDs and cursors.
 An observe continuation does not acknowledge that queue. Root `SessionEnd`
-follows already durable admitted child facts and appears on the final page with
+performs one bounded best-effort acquisition, follows accepted child facts and
+appears on the final page with
 `more: false`. A missing finish is never manufactured to make that page look
-quiescent.
+quiescent. An unreadable or larger remaining journal tail cannot veto the native
+root END. The host clears unresolved child spans when that root END commits.
 
 An acknowledged final cursor permits terminal retirement. Host abandonment
 immediately retires the correlation, wakes an active observe window and releases
@@ -69,10 +74,13 @@ native journal are refused.
 ## Failure boundaries
 
 The reader retains an incomplete trailing JSONL record until its newline arrives.
-Malformed complete records, incompatible identities, changed ancestry, observed
-journal truncation or changes at the retained byte frontier, unreadable admitted
-journals and exhausted bounded state fail
-the observation channel explicitly. None is interpreted as a child stop. Native
+Malformed complete records, incompatible identities, changed ancestry and unknown
+finish statuses supply no child fact. Unreadable admitted journals retain a retry
+through the filesystem service, without hiding facts from other readable journals.
+Observed truncation or a change at the retained byte frontier rebases only that
+journal to its current end and discards its old hook frontiers. Fresh authenticated
+hooks can admit later rows; replacement history cannot reopen old attempts.
+None of these conditions fails the root lifecycle channel or implies a child stop. Native
 filesystem events trigger acquisition through the shared service; cancellation
 waits do not poll the filesystem.
 
@@ -80,8 +88,11 @@ The adapter retains at most 256 host correlations, 128 active child attempts and
 4096 child attempt identities/admissions per correlation. Its queue also retains
 at most 4096 unacknowledged observations. A native JSONL record is bounded to
 16 MiB, buffered partial records to 64 MiB per correlation, and one reconciliation
-read to 4 MiB before yielding through the service. Limits fail explicitly instead
-of evicting identity or terminal evidence.
+read to 4 MiB before yielding through the service. Full child state or queue
+capacity refuses new child admissions locally. The shared queue reserves the
+terminal slot for every admitted child and for root END. Oversized records are
+skipped through their next newline. Existing child identities and accepted facts
+are retained until their real terminal evidence or host retirement.
 
 These observations support the ordinary managed launch owner. They do not create
 a universal lease across arbitrary physical-file aliases, profile copies or

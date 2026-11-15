@@ -6,15 +6,18 @@
 namespace grok {
 namespace addon = logonomic::cli_addon;
 namespace {
-std::string hooks_for_events(std::initializer_list<const char*> events)
+std::string hooks_for_events(std::initializer_list<const char*> events, bool previous_helper_directory = false)
 {
 #ifdef _WIN32
     // EncodedCommand prevents the vendor's POSIX expansion pass and whichever
     // Windows shell it selected from interpreting this PowerShell program.
+    const std::string helper = previous_helper_directory ?
+        "(Join-Path $d 'grok_helper.exe')" :
+        "(Join-Path (Split-Path -LiteralPath $d) 'adapter/grok_helper.exe')";
     const std::string script =
         "$d=[Environment]::GetEnvironmentVariable('LOGONOMIC_PROVIDER_HELPERS_DIR');"
         "$a=[Environment]::GetEnvironmentVariable('LOGONOMIC_SESSION_CAPABILITY');"
-        "if($d -and $a){& (Join-Path $d 'grok_helper.exe')};exit 0";
+        "if($d -and $a){& " + helper + "};exit 0";
     std::string utf16;
     for (char ch : script) { utf16 += ch; utf16 += '\0'; }
     const std::string command = "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand " +
@@ -22,10 +25,13 @@ std::string hooks_for_events(std::initializer_list<const char*> events)
 #else
     // Grok deliberately preserves modifier expressions for the runtime shell.
     // An ordinary native launch has no authority and cleanly does nothing.
+    const std::string helper = previous_helper_directory ?
+        "${LOGONOMIC_PROVIDER_HELPERS_DIR:-}/grok_helper" :
+        "${LOGONOMIC_PROVIDER_HELPERS_DIR%/*}/adapter/grok_helper";
     const std::string command =
         "if [ -n \"${LOGONOMIC_PROVIDER_HELPERS_DIR:-}\" ] && "
         "[ -n \"${LOGONOMIC_SESSION_CAPABILITY:-}\" ]; then "
-        "exec \"${LOGONOMIC_PROVIDER_HELPERS_DIR:-}/grok_helper\"; fi";
+        "exec \"" + helper + "\"; fi";
 #endif
     auto hooks = addon::Json_value::object();
     for (const auto* event : events) {
@@ -65,9 +71,9 @@ void transform_configuration(addon::Invocation_context& context)
     // preserve refusal for a user-modified or otherwise foreign file.
     if (request->present && request->content != desired &&
         request->content != hooks_for_events({"SessionStart", "SessionEnd", "UserPromptSubmit",
-            "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact"}) &&
+            "PreToolUse", "PostToolUse", "Stop", "StopFailure", "StopCancelled", "PostCompact"}, true) &&
         request->content != hooks_for_events({"SessionStart", "SessionEnd", "UserPromptSubmit",
-            "PreToolUse", "StopFailure", "StopCancelled"}))
+            "PreToolUse", "StopFailure", "StopCancelled"}, true))
     {
         context.fail(addon::Result_status::UNAVAILABLE, "managed_hook_file_conflict"); return;
     }

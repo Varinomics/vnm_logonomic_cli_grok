@@ -210,6 +210,9 @@ The filesystem observer links the maintained framework leaf and QtCore. Set
 an installed leaf or the owned `master` source. The shared SDK package recipe
 deploys each program's complete native runtime closure, including QtCore and the
 quota helper's HTTP libraries, with notices and exact runtime provenance.
+All five programs reside in `adapter/` and share one runtime copy. Managed hooks
+and helper proposals resolve those indexed program paths; the host's
+`LOGONOMIC_PROVIDER_HELPERS_DIR` environment contract is unchanged.
 `GROK_QTBASE_SOURCE` selects the matching qtbase notice source.
 `GROK_RUNTIME_NOTICES_DIRECTORY` supplies additional runtime notices named
 `<library filename>.txt`; Linux `GROK_LINUX_RUNTIME_MATERIAL` supplies verified

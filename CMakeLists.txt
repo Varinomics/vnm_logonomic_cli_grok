@@ -38,6 +38,7 @@ else()
 endif()
 
 include(cmake/grok_observation_dependency.cmake)
+logonomic_cli_addon_add_filesystem_observer()
 
 function(grok_target target)
     target_link_libraries(${target} PRIVATE logonomic_cli_addon_sdk::sdk)
@@ -72,7 +73,7 @@ target_sources(grok_provider PRIVATE
 grok_target(grok_provider)
 target_include_directories(grok_provider PUBLIC src)
 target_link_libraries(grok_provider PUBLIC logonomic_cli_addon_sdk::sdk
-    vnm_framework::vnm_filesystem_observation)
+    logonomic_cli_addon_sdk::filesystem_observer)
 if(WIN32)
     target_link_libraries(grok_provider PRIVATE advapi32)
 endif()
@@ -119,6 +120,7 @@ logonomic_cli_addon_add_qt_package(grok_package logonomic.cli.grok GROK_PACKAGE_
     RUNTIME_NOTICES "${GROK_RUNTIME_NOTICES_DIRECTORY}"
     LINUX_RUNTIME_MATERIAL "${GROK_LINUX_RUNTIME_MATERIAL}"
     OUT_RUNTIME_CHECK GROK_RUNTIME_CHECK
+    OUT_QTBASE_SOURCE GROK_QTBASE_SOURCE
     INDEX_ARGUMENTS
         --third-party "assets/grok.svg" "notices/lobe_icons_mit.txt"
             "provenance/lobe_icons.json"
@@ -239,7 +241,8 @@ add_executable(grok_fake_vnmctl tests/grok_fake_vnmctl.cpp)
 grok_target(grok_fake_vnmctl)
 add_dependencies(grok_fake_vnmctl grok_package)
 add_test(NAME grok_helper_gate_tests COMMAND "${CMAKE_COMMAND}"
-    "-DHELPER=${GROK_PACKAGE_DIRECTORY}/helpers/grok_helper${CMAKE_EXECUTABLE_SUFFIX}"
+    "-DHELPER=${GROK_PACKAGE_DIRECTORY}/adapter/grok_helper${CMAKE_EXECUTABLE_SUFFIX}"
+    "-DCONFIGURATION=$<TARGET_FILE:grok_runtime_tests>"
     "-DVNMCTL=$<TARGET_FILE:grok_fake_vnmctl>"
     "-DWORK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/helper-gate-fixture"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/grok_helper_gate_tests.cmake")

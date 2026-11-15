@@ -1,4 +1,4 @@
-if(NOT DEFINED HELPER OR NOT DEFINED VNMCTL OR NOT DEFINED WORK_DIRECTORY)
+if(NOT DEFINED HELPER OR NOT DEFINED CONFIGURATION OR NOT DEFINED VNMCTL OR NOT DEFINED WORK_DIRECTORY)
     message(FATAL_ERROR "Missing executable fixture paths")
 endif()
 file(MAKE_DIRECTORY "${WORK_DIRECTORY}")
@@ -9,7 +9,19 @@ file(COPY_FILE "${VNMCTL}" "${host_directory}/${vnmctl_name}" ONLY_IF_DIFFERENT)
 set(VNMCTL "${host_directory}/${vnmctl_name}")
 set(input "${WORK_DIRECTORY}/pretool.json")
 file(WRITE "${input}" "{\"hookEventName\":\"pre_tool_use\",\"hook_event_name\":\"PreToolUse\",\"sessionId\":\"root-session\"}")
-get_filename_component(helpers "${HELPER}" DIRECTORY)
+get_filename_component(program_directory "${HELPER}" DIRECTORY)
+get_filename_component(package "${program_directory}" DIRECTORY)
+set(helpers "${package}/helpers")
+execute_process(COMMAND "${CONFIGURATION}" --print-hook-configuration
+    OUTPUT_VARIABLE configuration COMMAND_ERROR_IS_FATAL ANY)
+string(JSON hook GET "${configuration}" hooks PreToolUse 0 hooks 0 command)
+if(WIN32)
+    set(hook_shell cmd)
+    set(hook_arguments /d /s /c)
+else()
+    set(hook_shell sh)
+    set(hook_arguments -c)
+endif()
 set(receipts "${WORK_DIRECTORY}/helper-receipts.jsonl")
 file(WRITE "${receipts}" "")
 execute_process(
@@ -21,7 +33,7 @@ execute_process(
         "LOGONOMIC_PROVIDER_GENERATION_NONCE=cccccccccccccccccccccccccccccccc"
         "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
         "GROK_HELPER_TEST_RECEIPTS=${receipts}"
-        "${HELPER}"
+        "${hook_shell}" ${hook_arguments} "${hook}"
     INPUT_FILE "${input}" OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
 # Grok's native command gate discards stdout on nonzero exit. Checking the
 # parsed text alone would therefore miss a broken model-context delivery.

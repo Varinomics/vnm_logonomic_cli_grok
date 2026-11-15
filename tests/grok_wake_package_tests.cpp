@@ -68,7 +68,7 @@ int main(int argc, char** argv)
         check(patch && patch->session_wake && patch->session_wake->available && patch->argv && patch->argv->size() == 6,
             "packaged wake preparation did not bind its indexed helper");
         check(fs::equivalent(addon::path_from_utf8(patch->argv->front()),
-            options.package_directory / "helpers" / fs::path(patch->argv->front()).filename()), "helper escaped package");
+            options.package_directory / "adapter" / fs::path(patch->argv->front()).filename()), "helper escaped package");
         check((*patch->argv)[1] == "--serve" && (*patch->argv)[3] == addon::path_to_utf8(native) &&
             (*patch->argv)[4] == "--model" && (*patch->argv)[5] == "grok-4.6", "native argument/profile preparation changed");
         check(patch->account_context && addon::encode_account_context(*patch->account_context) ==

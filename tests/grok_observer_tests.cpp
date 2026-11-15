@@ -24,6 +24,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -160,7 +161,8 @@ observation::Configuration test_configuration()
 class Fixture final
 {
 public:
-    explicit Fixture(const std::string& historical = {})
+    explicit Fixture(const std::string& historical = {},
+        const std::function<void(Fixture&, addon::Classify_event_request&)>& before_start = {})
     :
         m_root(fs::temp_directory_path() / ("grok-observer-" + addon::random_nonce_hex())),
         m_service(std::make_shared<observation::Service>()),
@@ -173,6 +175,9 @@ public:
         start.ledger = {};
         start.transition_nonce = m_nonce;
         start.event.body.set("source", Json("new"));
+        if (before_start) {
+            before_start(*this, start);
+        }
         const auto result = m_observer.classify(start);
         require(result && result->classification == addon::Classification::TRANSITION,
             "root SessionStart must retain its native transition");
@@ -358,19 +363,55 @@ void repeated_native_children_keep_distinct_attempts()
         "a stale finish cannot close a later attempt of the same native child");
 }
 
-void rewritten_journal_fails_without_inventing_a_stop()
+void optional_child_evidence_cannot_reject_root_lifecycle()
+{
+    for (const bool unreadable : {false, true}) {
+        Fixture fixture({}, [unreadable](Fixture& value, addon::Classify_event_request& start) {
+            if (unreadable) {
+                require(QFile::remove(value.path(k_root)), "remove the root journal fixture");
+                require(QDir().mkpath(value.path(k_root)), "make the optional journal unreadable as a file");
+            }
+            else {
+                start.event.body.set("transcriptPath", Json(17));
+            }
+        });
+        Observe_window window(fixture);
+        const auto ended = fixture.m_observer.classify(fixture.hook("SessionEnd"));
+        require(ended && ended->observations.empty(), "native root END remains queued without optional child storage");
+        const auto final = fixture.page(1);
+        require(final.observations.front().session_transition == addon::Session_transition::ENDED,
+            "malformed or unreadable optional storage cannot reject root END");
+        require(window.m_worker.wait_for(std::chrono::seconds(2)) == std::future_status::ready &&
+            window.m_context.m_result.has_value(), "root-only observation still completes successfully");
+    }
+    Fixture fixture;
+    fixture.append(k_root, "malformed complete row\n");
+    const auto ended = fixture.m_observer.classify(fixture.hook("SessionEnd"));
+    require(ended && fixture.page(1).observations.front().session_transition == addon::Session_transition::ENDED,
+        "a malformed optional row cannot reject an authenticated SessionEnd");
+}
+
+void rewritten_journal_rebases_without_inventing_a_stop()
 {
     Fixture fixture;
     fixture.admit("child");
     fixture.append(k_root, record(k_root, "child", "attempt", true));
     Observe_window window(fixture);
-    fixture.page(1);
+    const auto started = fixture.page(1);
+    const auto capture = fixture.capture();
     fixture.append(k_root, "", true);
-    require(window.m_worker.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
-        "journal truncation must terminate the unavailable observation channel");
-    require(window.m_context.m_status == addon::Result_status::FAILED &&
-        window.m_context.m_failure == "subagent_journal_rewritten", "journal replacement cannot reuse a stale byte cursor");
-    require(!poll(fixture.m_observer, fixture.m_nonce), "a failed journal never exposes a fabricated STOP page");
+    fixture.capture(capture);
+    const auto missing = poll(fixture.m_observer, fixture.m_nonce, started.resume_cursor);
+    require(missing && missing->observations.empty(), "missing bytes cannot fabricate a child STOP");
+    fixture.admit("later");
+    fixture.append(k_root, record(k_root, "later", "new", true) + record(k_root, "later", "new", false));
+    const auto later = fixture.page(2, started.resume_cursor);
+    require(later.observations.front().agent_id != started.observations.front().agent_id &&
+        later.observations.back().subagent_transition == addon::Subagent_transition::STOPPED,
+        "fresh authenticated evidence remains observable after a journal-local rebase");
+    fixture.m_observer.classify(fixture.hook("SessionEnd"));
+    require(fixture.page(1, later.resume_cursor).observations.front().session_transition == addon::Session_transition::ENDED,
+        "the host owns closure of the unresolved child at root END");
 }
 
 void native_child_parent_cannot_change()
@@ -381,12 +422,112 @@ void native_child_parent_cannot_change()
     fixture.append(k_root, record(k_root, "child", "first", true) +
         record(k_root, "other-parent", "parent-attempt", true));
     Observe_window window(fixture);
-    fixture.page(2);
+    const auto started = fixture.page(2);
     fixture.admit("child", "other-parent");
     fixture.append("other-parent", record("other-parent", "child", "second", true));
-    require(window.m_worker.wait_for(std::chrono::seconds(5)) == std::future_status::ready &&
-        window.m_context.m_failure == "subagent_journal_lineage_changed",
+    fixture.capture();
+    const auto invalid = poll(fixture.m_observer, fixture.m_nonce, started.resume_cursor);
+    require(invalid && invalid->observations.empty(),
         "an existing native child cannot move to another parent even with a new attempt_id");
+    fixture.append(k_root, record(k_root, "child", "first", false) +
+        record(k_root, "other-parent", "parent-attempt", false));
+    const auto stopped = fixture.page(2, started.resume_cursor);
+    require(stopped.observations.front().agent_id == started.observations.front().agent_id &&
+        stopped.observations.back().agent_id == started.observations.back().agent_id,
+        "rejected lineage evidence does not harm the already admitted children");
+}
+
+void malformed_and_unavailable_evidence_remains_local()
+{
+    Fixture fixture;
+    fixture.admit("child");
+    fixture.admit("other");
+    fixture.append(k_root, record(k_root, "child", "attempt", true) + record(k_root, "other", "attempt", true));
+    Observe_window window(fixture);
+    const auto started = fixture.page(2);
+    fixture.append(k_root, "{bad json}\n" + record(k_root, "child", "attempt", false, "future-status") +
+        record(k_root, "other", "attempt", false));
+    const auto other = fixture.page(1, started.resume_cursor);
+    require(other.observations.front().agent_id == started.observations.back().agent_id,
+        "invalid rows and unknown outcomes supply no fact and do not hide another child's finish");
+    const auto dispatches = fixture.capture();
+    const auto backup = fixture.path(k_root) + QStringLiteral(".saved");
+    require(QFile::rename(fixture.path(k_root), backup), "hold the admitted journal bytes");
+    require(QDir().mkpath(fixture.path(k_root)), "make the admitted journal temporarily unreadable");
+    require(wait_until([&] { return fixture.m_service->statistics().dispatches > dispatches; }),
+        "the service must attempt the unavailable capture");
+    require(poll(fixture.m_observer, fixture.m_nonce, other.resume_cursor).has_value(),
+        "a transient read failure leaves the observation channel available");
+    require(QDir().rmdir(fixture.path(k_root)) && QFile::rename(backup, fixture.path(k_root)),
+        "restore the exact admitted journal bytes");
+    fixture.append(k_root, record(k_root, "child", "attempt", false));
+    const auto recovered = fixture.page(1, other.resume_cursor);
+    require(recovered.observations.front().agent_id == started.observations.front().agent_id,
+        "recovered durable evidence closes only the remaining admitted attempt");
+}
+
+void capacity_refuses_new_children_and_preserves_terminal_facts()
+{
+    Fixture fixture;
+    std::string records;
+    for (int index = 0; index < 129; ++index) {
+        const auto child = "child-" + std::to_string(index);
+        fixture.admit(child);
+        records += record(k_root, child, "attempt", true);
+    }
+    fixture.append(k_root, records);
+    Observe_window window(fixture);
+    fixture.capture();
+    std::string cursor;
+    std::vector<addon::Lifecycle_observation> admitted;
+    for (;;) {
+        const auto page = poll(fixture.m_observer, fixture.m_nonce, cursor);
+        require(page.has_value(), "the 129th active attempt cannot fail the channel");
+        admitted.insert(admitted.end(), page->observations.begin(), page->observations.end());
+        cursor = page->resume_cursor;
+        if (!page->more) break;
+    }
+    require(admitted.size() == 128, "local admission respects the actual host active-child bound");
+    fixture.append(k_root, record(k_root, "child-128", "attempt", false) +
+        record(k_root, "child-0", "attempt", false));
+    const auto stopped = fixture.page(1, cursor);
+    require(stopped.observations.front().agent_id == admitted.front().agent_id,
+        "an unadmitted child has no STOP and an admitted child's STOP remains deliverable");
+    fixture.admit("replacement");
+    fixture.append(k_root, record(k_root, "replacement", "new", true));
+    const auto replacement = fixture.page(1, stopped.resume_cursor);
+    require(replacement.observations.front().subagent_transition == addon::Subagent_transition::STARTED,
+        "a released active slot can admit a new native attempt");
+    fixture.m_observer.classify(fixture.hook("SessionEnd"));
+    require(fixture.page(1, replacement.resume_cursor).observations.front().session_transition == addon::Session_transition::ENDED,
+        "active-child saturation cannot suppress root END");
+
+    Fixture full;
+    full.admit("held");
+    full.append(k_root, record(k_root, "held", "attempt", true));
+    for (int index = 0; index < 2050; ++index) {
+        const auto child = "short-" + std::to_string(index);
+        full.admit(child);
+        full.append(k_root, record(k_root, child, "attempt", true) + record(k_root, child, "attempt", false));
+    }
+    full.append(k_root, record(k_root, "held", "attempt", false));
+    full.m_observer.classify(full.hook("SessionEnd"));
+    cursor.clear();
+    std::vector<addon::Lifecycle_observation> saturated;
+    for (;;) {
+        const auto page = poll(full.m_observer, full.m_nonce, cursor);
+        require(page.has_value(), "bounded queue saturation cannot fail polling");
+        saturated.insert(saturated.end(), page->observations.begin(), page->observations.end());
+        cursor = page->resume_cursor;
+        if (!page->more) break;
+    }
+    require(saturated.size() <= 4096 && saturated.size() < 2 * 2050 + 3 && saturated.size() > 3,
+        "the queue refuses new optional spans within its retained bound");
+    require(saturated.back().session_transition == addon::Session_transition::ENDED &&
+        saturated[saturated.size() - 2].subagent_transition == addon::Subagent_transition::STOPPED &&
+        saturated[saturated.size() - 2].agent_id == saturated.front().agent_id,
+        "capacity is reserved for every admitted STOP and the final root END");
+    require(retire(full.m_observer, full.m_nonce, cursor), "a saturated final page retains normal terminal retirement");
 }
 
 void native_root_resume_uses_a_new_epoch()
@@ -467,8 +608,11 @@ int main()
         authenticated_attempts_and_torn_records();
         descendants_can_arrive_before_their_ancestry();
         repeated_native_children_keep_distinct_attempts();
-        rewritten_journal_fails_without_inventing_a_stop();
+        optional_child_evidence_cannot_reject_root_lifecycle();
+        rewritten_journal_rebases_without_inventing_a_stop();
         native_child_parent_cannot_change();
+        malformed_and_unavailable_evidence_remains_local();
+        capacity_refuses_new_children_and_preserves_terminal_facts();
         native_root_resume_uses_a_new_epoch();
         terminal_order_and_retirement();
         cancellation_and_cursor_ownership();

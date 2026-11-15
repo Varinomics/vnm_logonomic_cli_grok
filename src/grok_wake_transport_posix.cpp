@@ -585,7 +585,7 @@ std::string session_bridge_path()
     const auto executable = fs::read_symlink("/proc/self/exe", error);
 #endif
     if (error) return {};
-    return (executable.parent_path().parent_path() / "helpers" / "grok_session_bridge").string();
+    return (executable.parent_path() / "grok_session_bridge").string();
 }
 
 } // namespace grok

@@ -421,7 +421,7 @@ int main(int argc, char** argv)
         require(::sigprocmask(SIG_UNBLOCK, &signals, nullptr) == 0, "SIGPIPE is unblocked");
         const auto executable = fs::canonical(argv[0]).string();
         require(grok::session_bridge_path() ==
-            (fs::path(executable).parent_path().parent_path() / "helpers" / "grok_session_bridge").string(),
+            (fs::path(executable).parent_path() / "grok_session_bridge").string(),
             "session bridge resolves beside the original package executable");
         transport_contract(executable);
         uncertain_delivery_contract(executable);
