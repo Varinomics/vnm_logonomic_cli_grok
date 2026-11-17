@@ -126,8 +126,11 @@ addon::Resume_inspect_request inspect_request(const fs::path& native, const fs::
     request.context.working_directory = addon::path_to_utf8(cwd);
     request.context.launch_environment = addon::Launch_environment{
         addon::host_platform_id(), addon::Json_value::object(), std::nullopt};
-    for (const auto& [name, value] : addon::current_process_environment()) {
-        if (name == "SystemRoot" || name == "WINDIR" || name == "PATH") {
+    // Match names as the platform does: Windows spells the search path "Path".
+    const auto inherited = addon::current_process_environment();
+    for (const char* name : {"SystemRoot", "WINDIR", "PATH"}) {
+        const auto value = addon::environment_value(inherited, name);
+        if (!value.empty()) {
             request.context.launch_environment->effective_environment.set(name, addon::Json_value(value));
         }
     }

@@ -130,8 +130,12 @@ void exercise(const std::string& executable)
     direct.launcher_argv     = {program};
     direct.working_directory = addon::path_to_utf8(root / "project");
     direct.launch_environment = addon::Launch_environment{addon::host_platform_id(), addon::Json_value::object(), {}};
-    for (const auto& [name, value] : addon::current_process_environment()) {
-        if (name == "SystemRoot" || name == "WINDIR" || name == "PATH" || name == "HOME" || name == "USERPROFILE") {
+    // Windows spells the search path "Path"; the copied native image loads a
+    // dynamically linked C++ runtime through it.
+    const auto inherited = addon::current_process_environment();
+    for (const char* name : {"SystemRoot", "WINDIR", "PATH", "HOME", "USERPROFILE"}) {
+        const auto value = addon::environment_value(inherited, name);
+        if (!value.empty()) {
             direct.launch_environment->effective_environment.set(name, addon::Json_value(value));
         }
     }

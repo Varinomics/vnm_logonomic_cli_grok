@@ -1,6 +1,7 @@
 #include "grok_accounts.h"
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/launch_preparation.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/session_contracts.h>
 #include <algorithm>
 #include <filesystem>
@@ -55,8 +56,12 @@ int main(int argc, char** argv)
         prepare.launcher_argv = {addon::path_to_utf8(native), "--model", "grok-4.6"};
         prepare.working_directory = addon::path_to_utf8(directory);
         prepare.launch_environment = addon::Launch_environment{addon::host_platform_id(), addon::Json_value::object(), std::nullopt};
-        for (const auto& [name, value] : addon::current_process_environment()) {
-            if (name == "SystemRoot" || name == "WINDIR" || name == "PATH" || name == "HOME" || name == "USERPROFILE")
+        // Windows spells the search path "Path"; the copied native image loads a
+        // dynamically linked C++ runtime through it.
+        const auto inherited = addon::current_process_environment();
+        for (const char* name : {"SystemRoot", "WINDIR", "PATH", "HOME", "USERPROFILE"}) {
+            const auto value = addon::environment_value(inherited, name);
+            if (!value.empty())
                 prepare.launch_environment->effective_environment.set(name, addon::Json_value(value));
         }
         const auto profile = addon::path_to_utf8(directory / "native");
