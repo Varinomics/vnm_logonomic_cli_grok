@@ -13,6 +13,7 @@
 #include <logonomic_cli_addon/stored_usage_accounting.h>
 #include <logonomic_cli_addon/sha256.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -106,15 +107,17 @@ void rewrite_inventory(const fs::path& root)
     addon::Sha256 digest;
     digest.update(header); digest.update("\n");
     std::string bytes = header + "\n";
-    unsigned count = 0;
+    std::vector<std::string> entries;
     for (const auto& entry : fs::directory_iterator(root)) {
         if (entry.path().extension() != ".cache") continue;
-        const auto line = entry.path().stem().string() + ":" + addon::to_hex(addon::Sha256::digest(read(entry.path())));
+        entries.push_back(entry.path().stem().string() + ":" + addon::to_hex(addon::Sha256::digest(read(entry.path()))));
+    }
+    std::sort(entries.rbegin(), entries.rend());
+    for (const auto& line : entries) {
         bytes += line + "\n";
         digest.update(line); digest.update("\n");
-        ++count;
     }
-    bytes += "end:" + std::to_string(count) + ":" + addon::to_hex(digest.finish()) + "\n";
+    bytes += "end:" + std::to_string(entries.size()) + ":" + addon::to_hex(digest.finish()) + "\n";
     write(root / "cache-inventory", bytes);
 }
 
@@ -299,7 +302,10 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         const auto bytes = read(path);
         const auto newline = bytes.find('\n');
         auto header = *addon::parse_json(bytes.substr(0, newline), {}, nullptr);
-        if (kind == 0) header.set("version", addon::Json_value(99));
+        if (kind == 0) {
+            header.set("version", addon::Json_value(99));
+            rewrite_inventory(addon::usage_cache_io_path(root));
+        }
         if (kind == 1) header.set("account", addon::Json_value("foreign"));
         if (kind == 2) header.set("snapshot_id", addon::Json_value("foreign-snapshot"));
         if (kind < 3) write(path, addon::serialize_json(header) + bytes.substr(newline));

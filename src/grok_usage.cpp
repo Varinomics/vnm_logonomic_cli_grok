@@ -11,10 +11,6 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#else
-#include <cerrno>
-#include <fcntl.h>
-#include <unistd.h>
 #endif
 
 #include <algorithm>
@@ -212,38 +208,6 @@ bool digest_name(std::string_view value)
     });
 }
 
-void sync_file(const fs::path& path)
-{
-#if defined(_WIN32)
-    const auto handle = CreateFileW(path.c_str(), GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
-    require(handle != INVALID_HANDLE_VALUE, "usage_storage_sync_failed");
-    const bool synced = FlushFileBuffers(handle) != 0;
-    const bool closed = CloseHandle(handle) != 0;
-#else
-    const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    require(descriptor >= 0, "usage_storage_sync_failed");
-    const bool synced = fsync(descriptor) == 0;
-    const bool closed = close(descriptor) == 0;
-#endif
-    require(synced && closed, "usage_storage_sync_failed");
-}
-
-void sync_directory(const fs::path& path)
-{
-#if defined(_WIN32)
-    // File contents are flushed separately; replacement uses MOVEFILE_WRITE_THROUGH.
-    (void)path;
-#else
-    const int descriptor = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    require(descriptor >= 0, "usage_storage_sync_failed");
-    const bool synced = fsync(descriptor) == 0;
-    const bool closed = close(descriptor) == 0;
-    require(synced && closed, "usage_storage_sync_failed");
-#endif
-}
-
 bool read_line(std::istream& input, std::string* line)
 {
     line->clear();
@@ -271,20 +235,12 @@ void replace_file(const fs::path& source, const fs::path& destination)
     const auto previous_usage = active_budget ? active_budget->inspect(destination) : Disk_usage{};
     std::error_code error;
     require(!fs::is_symlink(fs::symlink_status(destination, error)), "usage_storage_link");
-    sync_file(source);
-#if defined(_WIN32)
-    require(MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
-        "usage_storage_replace_failed");
-#else
+    // This directory is private until the SDK flushes every candidate file
+    // and durably installs its manifest. Rewrites need only an atomic rename.
     error.clear();
     fs::rename(source, destination, error);
     require(!error, "usage_storage_replace_failed");
-#endif
     if (active_budget) active_budget->release(previous_usage);
-    sync_directory(destination.parent_path());
-    if (source.parent_path() != destination.parent_path()) {
-        sync_directory(source.parent_path());
-    }
 }
 
 void write_json(const fs::path& path, const addon::Json_value& value)
@@ -585,7 +541,6 @@ void copy_accepted_cache(const fs::path& accepted, const fs::path& candidate,
         require(addon::to_hex(contents.finish()) == line.substr(65), "required_usage_cache_unavailable");
         output.close();
         require(static_cast<bool>(output), "usage_storage_write_failed");
-        sync_file(destination);
     }
     throw Scan_failure{"required_usage_cache_unavailable"};
 }
@@ -954,6 +909,27 @@ private:
     std::uint64_t m_bytes = 0;
 };
 
+bool same_source_files(const fs::path& accepted, const fs::path& candidate, const std::function<bool()>& cancelled)
+{
+    // Directory iteration order is not part of a source inventory. Compare the
+    // sealed originals with their candidate counterparts in bounded memory.
+    std::uint64_t original_count = 0;
+    std::uint64_t candidate_count = 0;
+    for (const auto& entry : fs::directory_iterator(accepted)) {
+        check_cancel(cancelled);
+        if (entry.path().extension() != ".cache") continue;
+        const auto current = candidate / entry.path().filename();
+        if (!fs::is_regular_file(fs::symlink_status(current)) ||
+            file_digest(entry.path(), cancelled) != file_digest(current, cancelled)) return false;
+        ++original_count;
+    }
+    for (const auto& entry : fs::directory_iterator(candidate)) {
+        check_cancel(cancelled);
+        if (entry.path().extension() == ".cache") ++candidate_count;
+    }
+    return original_count == candidate_count;
+}
+
 bool copy_unknown_temporal(const fs::path& root,
     const std::optional<addon::Usage_cache_reference>& accepted,
     const std::optional<addon::Account_context>& account,
@@ -976,7 +952,7 @@ bool copy_unknown_temporal(const fs::path& root,
     const auto ledger = file_digest(source / "records", cancelled);
     if (member(*header, "accounting_ledger_sha256_hex") != addon::Json_value(ledger) ||
         file_digest(root / "records", cancelled) != ledger ||
-        file_digest(root / "cache-inventory", cancelled) != file_digest(source / "cache-inventory", cancelled))
+        !same_source_files(source, root, cancelled))
     {
         return false;
     }
@@ -999,7 +975,6 @@ bool copy_unknown_temporal(const fs::path& root,
         output.close(); input.close();
         require(static_cast<bool>(output) &&
             file_digest(destination, cancelled) == file_digest(original, cancelled), "usage_temporal_unavailable");
-        sync_file(destination);
     }
     return true;
 }
@@ -1194,8 +1169,6 @@ void write_temporal_sidecar(const fs::path& root, const fs::path& sorted,
     proof.close(); index.close(); bindings.close(); records.close();
     require(proof && index, "usage_storage_write_failed");
     budget.remove(sorted);
-    sync_file(root / k_temporal_file);
-    sync_file(root / k_temporal_index);
 }
 
 void prepare_temporal(const fs::path& root, const std::optional<addon::Usage_cache_reference>& accepted,
@@ -1476,7 +1449,6 @@ std::optional<addon::Usage_scan_page> scan_usage(
         auto metadata = addon::Json_value::object();
         metadata.set("scope", addon::encode_observation_scope(scope));
         metadata.set("incomplete", addon::Json_value(incomplete));
-        sync_file(work / "records");
         write_json(work / "snapshot", metadata);
         check_cancel(cancelled);
         auto state = addon::Json_value::object();
