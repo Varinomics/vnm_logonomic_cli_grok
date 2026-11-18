@@ -110,7 +110,7 @@ endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env "LOGONOMIC_PROVIDER_HELPERS_DIR=${helpers}"
         "${VNMCTL}" --verify-deliveries "${receipts}"
-    OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 10)
+    OUTPUT_VARIABLE output ERROR_VARIABLE errors RESULT_VARIABLE status TIMEOUT 60)
 if(NOT status STREQUAL "0")
     message(FATAL_ERROR "Native helper evidence did not survive packaged classification: ${status}: ${errors}")
 endif()

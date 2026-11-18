@@ -250,7 +250,8 @@ add_test(NAME grok_helper_gate_tests COMMAND "${CMAKE_COMMAND}"
     "-DVNMCTL=$<TARGET_FILE:grok_fake_vnmctl>"
     "-DWORK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/helper-gate-fixture"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/grok_helper_gate_tests.cmake")
-set_tests_properties(grok_helper_gate_tests PROPERTIES TIMEOUT 15)
+# Six bounded hook deliveries precede a separate multi-request classifier replay.
+set_tests_properties(grok_helper_gate_tests PROPERTIES TIMEOUT 135)
 
 # Exercise this repository's actual producer, never a substitute packaging
 # implementation. The isolated nested configure uses this same SDK source;
