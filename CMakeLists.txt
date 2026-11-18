@@ -239,7 +239,9 @@ grok_target(grok_usage_cache_tests)
 add_dependencies(grok_usage_cache_tests grok_package)
 add_test(NAME grok_usage_cache_tests
     COMMAND grok_usage_cache_tests "${GROK_PACKAGE_DIRECTORY}")
-set_tests_properties(grok_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
+# This fixture runs multiple scans and continuation pages, each with its own
+# SDK deadline, and seals separate on-disk histories between requests.
+set_tests_properties(grok_usage_cache_tests PROPERTIES TIMEOUT 600 LABELS "usage;cache;packaged-adapter")
 
 add_executable(grok_fake_vnmctl tests/grok_fake_vnmctl.cpp)
 grok_target(grok_fake_vnmctl)
