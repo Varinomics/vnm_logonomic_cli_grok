@@ -145,6 +145,10 @@ target_link_libraries(grok_observer_tests PRIVATE grok_provider)
 grok_target(grok_observer_tests)
 add_test(NAME grok_observer_tests COMMAND grok_observer_tests)
 set_tests_properties(grok_observer_tests PROPERTIES TIMEOUT 90)
+if(WIN32)
+    set_tests_properties(grok_observer_tests PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
 foreach(test_name IN ITEMS
     grok_runtime_tests grok_initial_prompt_tests grok_acp_tests grok_probe_tests
     grok_usage_tests grok_wake_protocol_tests grok_wake_identity_tests grok_context_tests)
