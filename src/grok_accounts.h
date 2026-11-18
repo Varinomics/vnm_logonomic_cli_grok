@@ -3,6 +3,7 @@
 #include <logonomic_cli_addon/adapter_runtime.h>
 #include <logonomic_cli_addon/session_contracts.h>
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,6 +16,7 @@ struct Profile_selection
     std::string profile_path;
 };
 
+std::filesystem::path canonical_native_path(std::string_view absolute_path);
 std::string profile_account_key(std::string_view absolute_path);
 std::optional<Profile_selection> profile_selection(
     const logonomic::cli_addon::Launch_environment& environment,

@@ -68,21 +68,24 @@ void write(const fs::path& path, const std::string& bytes)
     check(output.good(), "local telemetry fixture write failed");
 }
 
+fs::path write_source(const fs::path& profile, const std::string& id, unsigned tokens)
+{
+    const auto session = profile / "sessions/workspace" / id;
+    write(session / "summary.json", "{\"info\":{\"id\":\"" + id + "\",\"cwd\":\"\"}}");
+    const auto path = session / "usage.json";
+    write(path, "{\"sessionId\":\"" + id + "\",\"turns\":[{\"turnNumber\":1,"
+        "\"endedAt\":\"" + std::string(k_native_instant) + "\",\"inputTokens\":" + std::to_string(tokens) +
+        ",\"outputTokens\":0,\"totalTokens\":" + std::to_string(tokens) +
+        ",\"cachedReadTokens\":0,\"cacheCreationTokens\":0,\"reasoningTokens\":0,"
+        "\"costUsdTicks\":0,\"costIsPartial\":false,\"usageIsIncomplete\":false}]}");
+    return path;
+}
+
 std::vector<fs::path> write_sources(const fs::path& profile, unsigned tokens)
 {
-
     std::vector<fs::path> paths;
     for (unsigned index = 0; index < 270; ++index) {
-        const auto id = "session-" + std::to_string(index);
-        const auto session = profile / "sessions/workspace" / id;
-        write(session / "summary.json", "{\"info\":{\"id\":\"" + id + "\",\"cwd\":\"\"}}");
-        const auto path = session / "usage.json";
-        write(path, "{\"sessionId\":\"" + id + "\",\"turns\":[{\"turnNumber\":1,"
-            "\"endedAt\":\"" + std::string(k_native_instant) + "\",\"inputTokens\":" + std::to_string(tokens) +
-            ",\"outputTokens\":0,\"totalTokens\":" + std::to_string(tokens) +
-            ",\"cachedReadTokens\":0,\"cacheCreationTokens\":0,\"reasoningTokens\":0,"
-            "\"costUsdTicks\":0,\"costIsPartial\":false,\"usageIsIncomplete\":false}]}");
-        paths.push_back(path);
+        paths.push_back(write_source(profile, "session-" + std::to_string(index), tokens));
     }
     return paths;
 }
@@ -263,6 +266,33 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         validate(*reference);
         return *reference;
     };
+    {
+        const auto legacy = clone("legacy-source");
+        const auto io = addon::usage_cache_io_path(legacy);
+        const auto source = grok::canonical_native_path(addon::path_to_utf8(sources.front()));
+        const auto fold = addon::historical_account_profile_identity(source, source);
+        check(fold.has_value(), "retained fixture reproduces the former cache basename");
+        const auto digest = [](const std::string& bytes) { return addon::to_hex(addon::Sha256::digest(bytes)); };
+        const auto generic = addon::path_from_utf8(*fold).generic_u8string();
+        const auto previous_name = digest("profile-" + digest(std::string(generic.begin(), generic.end()))) + ".cache";
+        const auto current = io / (digest(addon::path_to_utf8(source)) + ".cache");
+        const auto bytes = read(current);
+        const auto newline = bytes.find('\n');
+        auto header = *addon::parse_json(bytes.substr(0, newline), {}, nullptr);
+        header.erase("canonical_source");
+        write(io / previous_name, addon::serialize_json(header) + bytes.substr(newline));
+        fs::remove(current);
+        rewrite_inventory(io);
+        const auto accepted = reseal(legacy);
+        fs::remove_all(sources.front().parent_path());
+        const auto fresh = write_source(profile, "fresh-session", 7);
+        select("migrated-source", accepted);
+        const auto page = test::usage_scan_pages(host, request, 3);
+        check(test::usage_token_total(page) == 2707 && page.records.size() == 271,
+            "a selected old cache retains a vanished source and counts the new source once");
+        validate(accepted);
+        fs::remove_all(fresh.parent_path());
+    }
     for (unsigned kind = 0; kind < 5; ++kind) {
         const auto root = clone("optional-" + std::to_string(kind));
         const auto path = addon::usage_cache_io_path(root) / "usage-temporal";

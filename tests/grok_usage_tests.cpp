@@ -4,6 +4,10 @@
 #include <logonomic_cli_addon/sha256.h>
 #include <logonomic_cli_addon/package_source.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include <chrono>
 #include <algorithm>
 #include <array>
@@ -74,6 +78,49 @@ void select_cache(addon::Usage_scan_request& request, const fs::path& storage,
     request.snapshot_id.reset();
     request.cursor.reset();
     request.cache_selection = addon::Usage_cache_selection{std::move(accepted), addon::path_to_utf8(candidate)};
+}
+
+void retargeted_source(const fs::path& root)
+{
+    const auto profile = root / "linked-profile";
+    const auto storage = root / "linked-storage";
+    const auto left = root / "left-sessions";
+    const auto right = root / "right-sessions";
+    const auto first = left / "workspace" / "session-a";
+    const auto second = right / "workspace" / "session-b";
+    fs::create_directory(profile);
+    fs::create_directory(storage);
+    fs::create_directories(first);
+    fs::create_directories(second);
+    write(first / "summary.json", summary());
+    write(first / "usage.json", usage(20));
+    write(second / "summary.json", summary({}, false, "session-b"));
+    write(second / "usage.json", usage(30, false, "session-b"));
+    const auto link = profile / "sessions";
+    std::error_code link_error;
+    fs::create_directory_symlink(left, link, link_error);
+#if defined(_WIN32)
+    if (link_error.value() == ERROR_PRIVILEGE_NOT_HELD || link_error == std::errc::operation_not_permitted) return;
+#endif
+    check(!link_error, "create a native source link for cache retention");
+    addon::Usage_scan_request request;
+    request.context.account_context = addon::Account_context{2, "fixture", addon::path_to_utf8(profile)};
+    std::string error;
+    select_cache(request, storage, "before-retarget");
+    const auto initial = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
+    check(initial && initial->cache_candidate && initial->records.size() == 1, error.c_str());
+    fs::path retained_file;
+    for (const auto& entry : fs::directory_iterator(storage / "before-retarget")) {
+        if (entry.path().extension() == ".cache") retained_file = entry.path().filename();
+    }
+    check(!retained_file.empty(), "the accepted source has a retained cache file");
+    fs::remove(link);
+    fs::create_directory_symlink(right, link);
+    select_cache(request, storage, "after-retarget", initial->cache_candidate);
+    const auto next = grok::scan_usage(request, profile, storage, [] { return false; }, &error);
+    check(next && next->records.size() == 2 && next->records[0].total_tokens == 25 &&
+        next->records[1].total_tokens == 35 && fs::is_regular_file(storage / "after-retarget" / retained_file),
+        "a retargeted directory keeps the recorded source under its original canonical identity and counts its replacement separately");
 }
 
 void exercise(const fs::path& root)
@@ -577,6 +624,7 @@ int main(int argc, char** argv)
         }
         else {
             exercise(root);
+            retargeted_source(root);
             interrupted_refresh(root);
             temporal_contract(root);
             temporal_capacity(root);

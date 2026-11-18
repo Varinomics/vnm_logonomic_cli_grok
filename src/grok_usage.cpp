@@ -179,9 +179,22 @@ std::string digest(std::string_view value)
     return addon::to_hex(addon::Sha256::digest(value));
 }
 
-std::string cache_key(std::string_view source)
+// Previous cache inventories named sources with the old account-key hash.
+// Use that format only to verify an already sealed file during migration.
+std::string legacy_cache_key(const fs::path& path)
 {
-    return digest(profile_account_key(source));
+    auto generic = path.generic_u8string();
+#ifdef _WIN32
+    const auto wide = path.generic_wstring();
+    const int count = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, wide.data(),
+        static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr, 0);
+    require(count > 0, "usage_cache_identity_mismatch");
+    std::wstring folded(static_cast<std::size_t>(count), L'\0');
+    require(LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, wide.data(),
+        static_cast<int>(wide.size()), folded.data(), count, nullptr, nullptr, 0) == count, "usage_cache_identity_mismatch");
+    generic = fs::path(folded).generic_u8string();
+#endif
+    return digest("profile-" + digest(std::string(generic.begin(), generic.end())));
 }
 
 std::string nonce()
@@ -355,6 +368,52 @@ bool fingerprint_matches(const addon::Json_value& metadata, const Fingerprint& v
     return false;
 }
 
+std::string retained_source_key(const addon::Json_value& header)
+{
+    if (header.find("legacy_source_key")) {
+        const auto key = string_member(header, "legacy_source_key");
+        require(!header.find("canonical_source") && digest_name(key), "usage_cache_identity_mismatch");
+        return key;
+    }
+    const auto canonical = string_member(header, "canonical_source");
+    require(addon::path_from_utf8(canonical).is_absolute(), "usage_cache_identity_mismatch");
+    return digest(canonical);
+}
+
+std::string migrate_source_key(addon::Json_value& header, const std::string& recorded_key)
+{
+    if (header.find("canonical_source") || header.find("legacy_source_key")) {
+        require(retained_source_key(header) == recorded_key, "usage_cache_identity_mismatch");
+#if defined(_WIN32)
+        if (header.find("canonical_source")) {
+            const auto captured = string_member(header, "canonical_source");
+            const auto current = canonical_native_path(captured);
+            if (path_text(current) != captured && addon::same_native_account_profile(addon::path_from_utf8(captured), current)) {
+                header.set("canonical_source", addon::Json_value(path_text(current)));
+                return retained_source_key(header);
+            }
+        }
+#endif
+        return recorded_key;
+    }
+    const auto locator = addon::path_from_utf8(string_member(header, "source"));
+    require(locator.is_absolute(), "usage_cache_identity_mismatch");
+    const auto canonical = canonical_native_path(path_text(locator));
+    const bool matches = legacy_cache_key(canonical) == recorded_key;
+    const auto observed = addon::historical_account_profile_identity(canonical, canonical);
+    if (matches && (addon::same_native_account_profile(locator.lexically_normal(), canonical) ||
+        (observed && observed == addon::native_account_profile_identity(canonical))))
+    {
+        header.set("canonical_source", addon::Json_value(path_text(canonical)));
+    }
+    else {
+        // The sealed inventory still owns these records when a former link
+        // target disappears. Keep their original key outside live-file lookup.
+        header.set("legacy_source_key", addon::Json_value(recorded_key));
+    }
+    return retained_source_key(header);
+}
+
 addon::Json_value read_cache_header(const fs::path& path, std::ifstream* input)
 {
     require(fs::is_regular_file(fs::symlink_status(path)), "usage_cache_invalid");
@@ -364,7 +423,7 @@ addon::Json_value read_cache_header(const fs::path& path, std::ifstream* input)
     require(read_line(*input, &line), "usage_cache_invalid");
     auto header = addon::parse_json(line, {}, nullptr);
     require(header && header->is_object(), "usage_cache_invalid");
-    require(cache_key(string_member(*header, "source")) == path.stem().string(), "usage_cache_identity_mismatch");
+    require(retained_source_key(*header) == path.stem().string(), "usage_cache_identity_mismatch");
     return std::move(*header);
 }
 
@@ -373,7 +432,8 @@ void refresh_file(const fs::path& path, const fs::path& work,
 {
     check_cancel(cancelled);
     const auto source = path_text(fs::absolute(path).lexically_normal());
-    const auto key = cache_key(source);
+    const auto canonical = path_text(canonical_native_path(source));
+    const auto key = digest(canonical);
     const auto cache_path = work / (key + ".cache");
     const auto before = fingerprint(path);
     const auto summary_before = fingerprint(path.parent_path() / "summary.json");
@@ -399,6 +459,7 @@ void refresh_file(const fs::path& path, const fs::path& work,
     auto next = addon::Json_value::object();
     next.set("revision", addon::Json_value(k_parser_revision));
     next.set("source", addon::Json_value(source));
+    next.set("canonical_source", addon::Json_value(canonical));
     next.set("size", addon::Json_value(std::to_string(before->size)));
     next.set("modified", addon::Json_value(addon::file_time_ticks_text(before->modified)));
     next.set("summary_size", addon::Json_value(std::to_string(summary_before->size)));
@@ -502,14 +563,20 @@ void copy_accepted_cache(const fs::path& accepted, const fs::path& candidate,
             digest_name(std::string_view(line).substr(65)), "required_usage_cache_unavailable");
         hash.update(line); hash.update("\n"); ++count;
         const auto name = line.substr(0, 64) + ".cache";
-        const auto destination = candidate / name;
-        require(!fs::exists(fs::symlink_status(destination)), "required_usage_cache_unavailable");
         require(fs::is_regular_file(fs::symlink_status(accepted / name)), "required_usage_cache_unavailable");
         std::ifstream source(accepted / name, std::ios::binary);
-        Budget_output output(destination, std::ios::binary | std::ios::trunc);
-        require(source && output, "usage_storage_open_failed");
-        addon::Sha256 contents;
         std::string record;
+        require(source && read_line(source, &record), "required_usage_cache_unavailable");
+        auto metadata = addon::parse_json(record, {}, nullptr);
+        require(metadata && metadata->is_object(), "usage_cache_invalid");
+        const auto key = migrate_source_key(*metadata, line.substr(0, 64));
+        const auto destination = candidate / (key + ".cache");
+        require(!fs::exists(fs::symlink_status(destination)), "required_usage_cache_unavailable");
+        Budget_output output(destination, std::ios::binary | std::ios::trunc);
+        require(static_cast<bool>(output), "usage_storage_open_failed");
+        addon::Sha256 contents;
+        contents.update(record); contents.update("\n");
+        write_line(output, addon::serialize_json(*metadata));
         while (read_line(source, &record)) {
             check_cancel(cancelled);
             contents.update(record); contents.update("\n");
@@ -599,7 +666,7 @@ void sorted_snapshot(const fs::path& work, bool* incomplete, const std::function
             check_cancel(cancelled);
             auto record = decode_record(line);
             if (record.usage.input.coverage->covered_records == 0) *incomplete = true;
-            require(record.usage.source_path && cache_key(*record.usage.source_path) == cache_key(source), "usage_cache_identity_mismatch");
+            require(record.usage.source_path == source, "usage_cache_identity_mismatch");
             refresh_repository(&record);
             auto encoded = encode_record(record);
             require(candidate_records < active_budget->limits().candidate_records && encoded.size() + 1 <=
@@ -753,8 +820,10 @@ Native_times matching_native_times(const fs::path& cache_path,
     Native_times times;
     std::ifstream cached;
     const auto header = read_cache_header(cache_path, &cached);
-    if (member(header, "revision") != addon::Json_value(k_parser_revision)) return times;
+    if (member(header, "revision") != addon::Json_value(k_parser_revision) || header.find("legacy_source_key")) return times;
     const auto source = addon::path_from_utf8(string_member(header, "source"));
+    if (!addon::same_native_account_profile(addon::path_from_utf8(string_member(header, "canonical_source")),
+        canonical_native_path(path_text(source)))) return times;
     const auto before = fingerprint(source);
     const auto summary_before = fingerprint(source.parent_path() / "summary.json");
     if (!before || !summary_before || !fingerprint_matches(header, *before) ||

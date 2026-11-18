@@ -6,7 +6,9 @@ Standalone C++20 package `logonomic.cli.grok`, using the public Logonomic CLI
 add-on SDK. Windows/Linux x86-64 and macOS ARM64 artifacts are built separately.
 
 The provider preserves the selected `GROK_HOME` profile. Account discovery uses
-Grok's platform home convention and empty-override behavior. Authentication
+Grok's platform home convention and empty-override behavior. Account grants
+bind launches, probes and usage scans to the selected native directory,
+including on Windows volumes with case-sensitive directories. Authentication
 inspection reads the native `grok models` status banner after successful process
 completion. Quota inspection reads the selected profile's current public xAI
 OIDC credential and calls Grok's fixed HTTPS billing and settings endpoints.

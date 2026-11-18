@@ -5,10 +5,6 @@
 #include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/sha256.h>
 
-#if defined(_WIN32)
-#include <windows.h>
-#endif
-
 #include <algorithm>
 #include <filesystem>
 #include <string>
@@ -53,32 +49,34 @@ std::optional<std::string> environment_value(const addon::Json_value& environmen
     return {};
 }
 
+std::string key_from_identity(std::optional<std::string> identity)
+{
+    if (!identity) return {};
+#if defined(_WIN32)
+    // Grok historically hashed generic separators. A swap preserves every
+    // distinction in the SDK's opaque identity, including its binary domains.
+    for (char& byte : *identity) {
+        if (byte == '\\') byte = '/';
+        else if (byte == '/') byte = '\\';
+    }
+#endif
+    return "profile-" + addon::to_hex(addon::Sha256::digest(*identity));
+}
+
 } // namespace
+
+fs::path canonical_native_path(std::string_view absolute_path)
+{
+    const auto original = addon::path_from_utf8(absolute_path);
+    if (!original.is_absolute()) return {};
+    std::error_code error;
+    const auto canonical = fs::weakly_canonical(original, error);
+    return addon::path_from_utf8(path_text(error ? original : canonical));
+}
 
 std::string profile_account_key(std::string_view absolute_path)
 {
-    // Resolve the existing ancestor before normalizing an absent suffix. The
-    // account key must not change when the CLI creates that profile. This is
-    // identity only: the native locator and launch value remain verbatim.
-    std::error_code error;
-    fs::path path = fs::weakly_canonical(logonomic::cli_addon::path_from_utf8(absolute_path), error);
-    if (error) path = logonomic::cli_addon::path_from_utf8(absolute_path);
-    path = logonomic::cli_addon::path_from_utf8(path_text(path));
-#if defined(_WIN32)
-    std::wstring wide = path.generic_wstring();
-    const int size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, wide.data(),
-        static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr, 0);
-    if (size == 0) return {};
-    std::wstring folded(static_cast<std::size_t>(size), L'\0');
-    if (!LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, wide.data(),
-            static_cast<int>(wide.size()), folded.data(), size, nullptr, nullptr, 0))
-    {
-        return {};
-    }
-    path = fs::path(folded);
-#endif
-    const auto bytes = path.generic_u8string();
-    return "profile-" + addon::to_hex(addon::Sha256::digest(std::string(bytes.begin(), bytes.end())));
+    return key_from_identity(addon::native_account_profile_identity(canonical_native_path(absolute_path)));
 }
 
 std::optional<Profile_selection> profile_selection(const addon::Launch_environment& environment,
@@ -130,12 +128,6 @@ std::optional<std::string> launch_profile_home(const addon::Session_launch_conte
         context.fail(addon::Result_status::UNAVAILABLE, "launcher_environment_unavailable"); return {};
     }
     if (!raw || raw->empty()) return selected->profile_path;
-    auto actual = logonomic::cli_addon::path_from_utf8(*raw);
-    if (!actual.is_absolute()) actual = logonomic::cli_addon::path_from_utf8(request.working_directory) / actual;
-    if (profile_account_key(path_text(actual)) != selected->adapter_account_key) {
-        context.fail(addon::Result_status::UNAVAILABLE, "account_context_mismatch");
-        return {};
-    }
     return raw;
 }
 
@@ -147,7 +139,22 @@ std::optional<Profile_selection> selected_profile(const addon::Session_launch_co
         return std::nullopt;
     }
     Profile_selection selected{request.account_context->adapter_account_key, *request.account_context->profile_path};
-    if (selected.adapter_account_key != profile_account_key(selected.profile_path)) {
+    const auto path = canonical_native_path(selected.profile_path);
+    if (request.launch_environment) {
+        const auto& environment = *request.launch_environment;
+        const auto raw = environment_value(environment.effective_environment, "GROK_HOME",
+            environment.platform_id.starts_with("windows-"));
+        if (raw && !raw->empty()) {
+            const auto actual = addon::path_from_utf8(request.working_directory) / addon::path_from_utf8(*raw);
+            if (!addon::same_native_account_profile(path, canonical_native_path(path_text(actual)))) {
+                context.fail(addon::Result_status::UNAVAILABLE, "account_context_mismatch");
+                return std::nullopt;
+            }
+        }
+    }
+    if (selected.adapter_account_key != key_from_identity(addon::native_account_profile_identity(path)) &&
+        selected.adapter_account_key != key_from_identity(addon::historical_account_profile_identity(path, path)))
+    {
         context.fail(addon::Result_status::UNAVAILABLE, "account_context_mismatch");
         return std::nullopt;
     }

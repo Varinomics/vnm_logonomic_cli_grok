@@ -8,6 +8,11 @@
 #include <logonomic_cli_addon/probe_contracts.h>
 #include <logonomic_cli_addon/quota.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#include <logonomic_cli_addon/sha256.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include <iostream>
 #include <optional>
@@ -305,9 +310,82 @@ void accounts_are_named_after_their_profile_folders()
     check(discovered_name(long_home.c_str()) == addon::account_display_name(long_home),
         "an over-long folder name is fitted by the SDK's account display-name rule");
 }
+#if defined(_WIN32)
+void native_profile_grants()
+{
+    namespace fs = std::filesystem;
+    const auto root = fs::canonical(fs::temp_directory_path()) / ("grok-native-profile-" + addon::random_nonce_hex());
+    fs::create_directory(root);
+    struct Cleanup { fs::path root; ~Cleanup() { std::error_code error; fs::remove_all(root, error); } } cleanup{root};
+    const auto key = [](const fs::path& path) { return grok::profile_account_key(addon::path_to_utf8(path)); };
+    const auto old_key = [](const fs::path& path) {
+        const auto canonical = grok::canonical_native_path(addon::path_to_utf8(path));
+        const auto folded = addon::historical_account_profile_identity(canonical, canonical);
+        check(folded.has_value(), "fixture profile ancestry must be observable");
+        const auto generic = addon::path_from_utf8(*folded).generic_u8string();
+        return "profile-" + addon::to_hex(addon::Sha256::digest(std::string(generic.begin(), generic.end())));
+    };
+    const auto ordinary = root / addon::path_from_utf8("Caf\xc3\x89");
+    const auto old = old_key(ordinary);
+    check(key(ordinary) == old && fs::create_directory(ordinary) && key(ordinary) == old,
+        "ordinary Windows keys retain historical generic separators and Unicode folding across creation");
+    if (ordinary.root_name().native().size() == 2 && ordinary.root_name().native()[1] == L':') {
+        check(key(fs::path(L"\\\\?\\" + ordinary.native())) == old, "an extended drive spelling preserves the normal key");
+        const auto share = fs::path(L"\\\\localhost\\" + ordinary.root_name().native().substr(0, 1) + L"$") / ordinary.relative_path();
+        std::error_code error;
+        if (fs::is_directory(share, error) && !error &&
+            addon::historical_account_profile_identity(share, share)) {
+            check(key(share) == old_key(share), "an observable local UNC profile retains its historical generic spelling");
+        }
+    }
+
+    const auto sensitive = root / "sensitive";
+    fs::create_directory(sensitive);
+    const HANDLE handle = CreateFileW(sensitive.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    check(handle != INVALID_HANDLE_VALUE, "open the NTFS fixture directory");
+    FILE_CASE_SENSITIVE_INFO info{FILE_CS_FLAG_CASE_SENSITIVE_DIR};
+    const BOOL enabled = SetFileInformationByHandle(handle, FileCaseSensitiveInfo, &info, sizeof(info));
+    const DWORD error = enabled ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(handle);
+    if (error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD || error == ERROR_ACCESS_DENIED ||
+        error == ERROR_INVALID_PARAMETER) return;
+    check(enabled, "enable case-sensitive profile names");
+    const auto first = sensitive / "Work";
+    const auto second = sensitive / "work";
+    check(fs::create_directory(first) && fs::create_directory(second) && !fs::equivalent(first, second),
+        "create native-distinct profile directories");
+    const auto shared = old_key(first);
+    check(shared == old_key(second) && key(first) != key(second) && key(first) != shared && key(second) != shared,
+        "distinct native profiles must not claim the previous collision");
+    addon::Session_launch_context request;
+    request.launcher = {"grok", addon::k_runner_direct, {}};
+    request.launcher_argv = {"grok"};
+    request.working_directory = addon::path_to_utf8(root);
+    request.launch_environment = addon::Launch_environment{"windows-x86_64", addon::Json_value::object(), std::nullopt};
+    const auto admits = [&](const fs::path& selected, const std::string& granted_key, const fs::path& granted) {
+        request.launch_environment->effective_environment.set("GROK_HOME", addon::Json_value(addon::path_to_utf8(selected)));
+        request.account_context = addon::Account_context{2, granted_key, addon::path_to_utf8(granted)};
+        Context context;
+        return grok::launch_profile_home(request, context).has_value();
+    };
+    check(admits(first, shared, first) && !admits(second, shared, first) && !admits(second, key(first), first),
+        "both current and historical grants bind the retained profile and the frozen Grok launch");
+    check(admits(root / addon::path_from_utf8("caf\xc3\xa9"), old, ordinary),
+        "the same Windows filesystem location remains a valid spelling alias");
+}
+#endif
 } // namespace
 int main()
 {
-    try { exercise(); quota_is_read_by_the_packaged_helper(); accounts_are_named_after_their_profile_folders(); return 0; }
+    try {
+        exercise();
+        quota_is_read_by_the_packaged_helper();
+        accounts_are_named_after_their_profile_folders();
+#if defined(_WIN32)
+        native_profile_grants();
+#endif
+        return 0;
+    }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
