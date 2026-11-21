@@ -79,6 +79,7 @@ if(WIN32)
 endif()
 
 add_executable(grok_adapter src/adapter.cpp)
+target_compile_definitions(grok_adapter PRIVATE LOGONOMIC_CLI_ADDON_ADAPTER_VERSION="${PROJECT_VERSION}")
 target_link_libraries(grok_adapter PRIVATE grok_provider)
 grok_target(grok_adapter)
 add_executable(grok_helper src/grok_helper.cpp)

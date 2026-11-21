@@ -67,7 +67,7 @@ int main()
 {
     addon::Adapter_runtime_options options;
     options.adapter_name = "grok-addon";
-    options.adapter_version = "1.0.0";
+    options.adapter_version = LOGONOMIC_CLI_ADDON_ADAPTER_VERSION;
     options.capabilities = {
         {addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
         {addon::k_interactive_initial_prompt_capability_id, addon::k_interactive_initial_prompt_version},

@@ -205,13 +205,12 @@ The SDK source dependency tracks `vnm_logonomic_cli_addon` on `master`. Set
 for coordinated development. `grok_package` produces the indexed package under
 `package/logonomic.cli.grok` in a single-configuration build directory, or
 `package/<config>/logonomic.cli.grok` with a multi-configuration generator.
-Follow workstation build
-queue and toolchain instructions for configuration and compilation. CTest
+CTest
 registers runtime, account/probe, usage, package-validation and conformance
 fixtures. Building a package does not activate it or migrate user data.
 
-The filesystem observer links the maintained `vnm_filesystem_observation` library and Qt 6.12 Core. Set
-`GROK_OBSERVATION_SOURCE` for a local `vnm_filesystem_observation` checkout; otherwise the build uses
+The filesystem observer links Qt Core and `vnm_filesystem_observation`. Set
+`GROK_OBSERVATION_SOURCE` for a local checkout. Otherwise the build uses
 an installed leaf or the owned `master` source. The shared SDK package recipe
 deploys each program's complete native runtime closure, including QtCore and the
 quota helper's HTTP libraries, with notices and exact runtime provenance.
@@ -226,15 +225,7 @@ notice acquisition to the same selected SDK through its thin preparation script.
 `grok_package_runtime_closure` checks the assembled package's private runtime
 closure; package validation and conformance remain separate gates.
 
-The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
-during configuration. `cmake --install` exports a fresh artifact beneath its install-time
-prefix and preserves executable permissions. An existing per-package destination,
-including a dangling symlink, is refused. POSIX `DESTDIR` staging is supported;
-nonempty `DESTDIR` with a drive-letter prefix is refused. Export is not atomic:
-a failure may leave a partial artifact directory. Choose a fresh destination or
-manually remove only that identified disposable export before retrying; never
-remove an installed generation this way. The application's package ingestion
-owns atomic installation and updates.
+Use `cmake --install` to export the indexed package to a fresh directory. See [SDK package export](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/sdk/logonomic_cli_addon_sdk/docs/package_contract.md#exporting-a-package).
 
 The upstream source revision and contract locations are recorded in
 `package/provenance/upstream_contract.json`. The Grok icons derive from Lobe
