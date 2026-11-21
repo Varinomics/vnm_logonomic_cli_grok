@@ -199,6 +199,7 @@ commit outcome and preserves both generations.
 
 The [contributor guide](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/CONTRIBUTING.md) covers local package checks.
 Send provider pull requests to [the grok repository](https://github.com/Varinomics/vnm_logonomic_cli_grok/pulls).
+See the [repository license](LICENSE) for the terms covering Varinomics code.
 
 The SDK source dependency tracks `vnm_logonomic_cli_addon` on `master`. Set
 `LOGONOMIC_CLI_ADDON_SDK_SOURCE` to a local `sdk/logonomic_cli_addon_sdk` directory
@@ -209,9 +210,10 @@ CTest
 registers runtime, account/probe, usage, package-validation and conformance
 fixtures. Building a package does not activate it or migrate user data.
 
-The filesystem observer links Qt Core and `vnm_filesystem_observation`. Set
-`GROK_OBSERVATION_SOURCE` for a local checkout. Otherwise the build uses
-an installed leaf or the owned `master` source. The shared SDK package recipe
+The filesystem observer requires Qt Core and the
+[filesystem observation library](https://github.com/Varinomics/vnm_filesystem_observation).
+Set `GROK_OBSERVATION_SOURCE` for a local checkout. Otherwise the build uses
+an installed package or fetches the library's `master` branch. The shared SDK package recipe
 deploys each program's complete native runtime closure, including QtCore and the
 quota helper's HTTP libraries, with notices and exact runtime provenance.
 All five programs reside in `adapter/` and share one runtime copy. Managed hooks
