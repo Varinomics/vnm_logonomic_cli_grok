@@ -2,7 +2,7 @@
 
 [![Grok add-on CI](https://github.com/Varinomics/vnm_logonomic_cli_grok/actions/workflows/provider-ci.yml/badge.svg?branch=master)](https://github.com/Varinomics/vnm_logonomic_cli_grok/actions/workflows/provider-ci.yml)
 
-Standalone C++20 package `logonomic.cli.grok`, using the public Logonomic CLI
+Standalone C++20 package `logonomic.cli.grok`, using the Logonomic CLI
 add-on SDK. Windows/Linux x86-64 and macOS ARM64 artifacts are built separately.
 
 The provider preserves the selected `GROK_HOME` profile. Account discovery uses
@@ -197,7 +197,10 @@ Cancelled or rejected candidate scans cannot modify accepted retained history.
 A filesystem sync failure after pointer replacement reports an indeterminate
 commit outcome and preserves both generations.
 
-The SDK source dependency tracks the owned Logonomic `master` branch. Set
+The [contributor guide](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/CONTRIBUTING.md) covers local package checks.
+Send provider pull requests to [the grok repository](https://github.com/Varinomics/vnm_logonomic_cli_grok/pulls).
+
+The SDK source dependency tracks `vnm_logonomic_cli_addon` on `master`. Set
 `LOGONOMIC_CLI_ADDON_SDK_SOURCE` to a local `sdk/logonomic_cli_addon_sdk` directory
 for coordinated development. `grok_package` produces the indexed package under
 `package/logonomic.cli.grok` in a single-configuration build directory, or
@@ -207,8 +210,8 @@ queue and toolchain instructions for configuration and compilation. CTest
 registers runtime, account/probe, usage, package-validation and conformance
 fixtures. Building a package does not activate it or migrate user data.
 
-The filesystem observer links the maintained framework leaf and QtCore. Set
-`GROK_FRAMEWORK_SOURCE` for a local framework checkout; otherwise the build uses
+The filesystem observer links the maintained `vnm_filesystem_observation` library and Qt 6.12 Core. Set
+`GROK_OBSERVATION_SOURCE` for a local `vnm_filesystem_observation` checkout; otherwise the build uses
 an installed leaf or the owned `master` source. The shared SDK package recipe
 deploys each program's complete native runtime closure, including QtCore and the
 quota helper's HTTP libraries, with notices and exact runtime provenance.

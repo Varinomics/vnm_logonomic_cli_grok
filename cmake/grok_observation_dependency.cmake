@@ -1,19 +1,18 @@
 # An embedding build may already own the selected filesystem service.
-set(GROK_FRAMEWORK_SOURCE "" CACHE PATH "Local vnm_framework source override")
+set(GROK_OBSERVATION_SOURCE "" CACHE PATH "Local vnm_filesystem_observation source override")
 if(NOT TARGET vnm_framework::vnm_filesystem_observation)
-    if(GROK_FRAMEWORK_SOURCE)
-        add_subdirectory("${GROK_FRAMEWORK_SOURCE}/cpp/filesystem_observation"
+    if(GROK_OBSERVATION_SOURCE)
+        add_subdirectory("${GROK_OBSERVATION_SOURCE}"
             "${CMAKE_CURRENT_BINARY_DIR}/filesystem_observation")
     else()
         find_package(vnm_filesystem_observation CONFIG QUIET)
         if(NOT TARGET vnm_framework::vnm_filesystem_observation)
             include(FetchContent)
-            FetchContent_Declare(grok_framework
-                GIT_REPOSITORY https://github.com/Varinomics/vnm_framework.git
+            FetchContent_Declare(vnm_filesystem_observation
+                GIT_REPOSITORY https://github.com/Varinomics/vnm_filesystem_observation.git
                 GIT_TAG master
-                GIT_SHALLOW TRUE
-                SOURCE_SUBDIR cpp/filesystem_observation)
-            FetchContent_MakeAvailable(grok_framework)
+                GIT_SHALLOW TRUE)
+            FetchContent_MakeAvailable(vnm_filesystem_observation)
         endif()
     endif()
 endif()
@@ -26,7 +25,7 @@ get_target_property(grok_observation_imported
 if(NOT grok_observation_imported)
     get_target_property(grok_observation_source
         vnm_framework::vnm_filesystem_observation SOURCE_DIR)
-    get_filename_component(grok_framework_source "${grok_observation_source}/../.." ABSOLUTE)
+    cmake_path(GET grok_observation_source PARENT_PATH grok_observation_source)
 endif()
 get_target_property(grok_dispatch_imported vnm_qt_dispatch::vnm_qt_dispatch IMPORTED)
 if(NOT grok_dispatch_imported)

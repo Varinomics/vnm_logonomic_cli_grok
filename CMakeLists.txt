@@ -29,7 +29,7 @@ else()
     else()
         include(FetchContent)
         FetchContent_Declare(logonomic_sdk_source
-            GIT_REPOSITORY https://github.com/Varinomics/logonomic.git
+            GIT_REPOSITORY https://github.com/Varinomics/vnm_logonomic_cli_addon.git
             GIT_TAG master
             GIT_SHALLOW TRUE
             SOURCE_SUBDIR sdk/logonomic_cli_addon_sdk)
@@ -272,7 +272,7 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
             "--generator-platform=${CMAKE_GENERATOR_PLATFORM}" "--toolset=${CMAKE_GENERATOR_TOOLSET}"
             "--toolchain=${CMAKE_TOOLCHAIN_FILE}" "--compiler=${CMAKE_CXX_COMPILER}"
             "--make-program=${CMAKE_MAKE_PROGRAM}" "--prefix-path=${CMAKE_PREFIX_PATH}"
-            "--cmake-definition=GROK_FRAMEWORK_SOURCE=${grok_framework_source}"
+            "--cmake-definition=GROK_OBSERVATION_SOURCE=${grok_observation_source}"
             "--cmake-definition=FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH=${grok_dispatch_source}"
             "--cmake-definition=FETCHCONTENT_SOURCE_DIR_VNM_CMAKE=${grok_vnm_cmake_source}"
             "--cmake-definition=vnm_filesystem_observation_DIR=${vnm_filesystem_observation_DIR}"
